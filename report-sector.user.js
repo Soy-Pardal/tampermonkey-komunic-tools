@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Komunic - Ranking de Atendentes com PDF (agrupado por setor)
 // @namespace    http://tampermonkey.net/
-// @version      3.1
-// @description  Gera PDF bonito com ranking de atendentes, agrupado por setor quando selecionado "Todos", com indicador de loading.
+// @version      3.2
+// @description  Gera PDF bonito com ranking de atendentes, agrupado por setor, com loading e acentos corrigidos.
 // @author       Gabriel
 // @match        https://app.komunic.net/*
 // @grant        GM_xmlhttpRequest
@@ -138,7 +138,7 @@
 
     // Retorna array de objetos com { setor, atendentes[] }
     function agruparPorSetor(dadosCompletos) {
-        const grupos = new Map(); // setor -> array de atendentes
+        const grupos = new Map();
         dadosCompletos.forEach(item => {
             const setores = item.setores ? item.setores.split(', ') : ['Sem setor'];
             setores.forEach(setor => {
@@ -146,24 +146,32 @@
                 grupos.get(setor).push(item);
             });
         });
-        // Ordenar cada grupo por quantidade decrescente
         for (let [setor, lista] of grupos.entries()) {
             lista.sort((a,b) => b.services_count - a.services_count);
             grupos.set(setor, lista);
         }
-        // Retornar array ordenado alfabeticamente pelos setores
         return Array.from(grupos.entries())
             .sort((a,b) => a[0].localeCompare(b[0]))
             .map(([setor, lista]) => ({ setor, atendentes: lista }));
     }
 
-    // Gerar PDF com suporte a agrupamento por setor
-    async function gerarPDF(botao) {
-        const originalText = botao.innerText;
-        botao.disabled = true;
-        // Adiciona um ícone de loading (spinner CSS)
-        botao.innerHTML = '<span style="display:inline-block; width:16px; height:16px; border:2px solid white; border-top-color:transparent; border-radius:50%; animation: spin 0.6s linear infinite; margin-right:8px;"></span> Gerando PDF...';
-        // Injeta animação CSS (caso não exista)
+    // Função para corrigir acentuação no jsPDF
+    function fixEncoding(str) {
+        if (!str) return '';
+        try {
+            return unescape(encodeURIComponent(str));
+        } catch(e) {
+            return str;
+        }
+    }
+
+    // Gerar PDF com suporte a agrupamento por setor e acentos corrigidos
+    async function gerarPDF(botaoModal, modalDiv) {
+        const originalText = botaoModal.innerText;
+        botaoModal.disabled = true;
+        botaoModal.innerHTML = '<span style="display:inline-block; width:16px; height:16px; border:2px solid white; border-top-color:transparent; border-radius:50%; animation: spin 0.6s linear infinite; margin-right:8px;"></span> Gerando PDF...';
+        
+        // Adiciona estilo de animação se não existir
         if (!document.querySelector('#loading-spinner-style')) {
             const style = document.createElement('style');
             style.id = 'loading-spinner-style';
@@ -190,23 +198,22 @@
             const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
             let y = 20;
 
-            // Cabeçalho geral
+            // Cabeçalho geral (com correção de encoding)
             doc.setFontSize(18);
             doc.setTextColor(251, 146, 60);
-            doc.text(`Ranking de Atendentes - ${PERIODOS[periodoAtual]}`, 14, y);
+            doc.text(fixEncoding(`Ranking de Atendentes - ${PERIODOS[periodoAtual]}`), 14, y);
             y += 8;
             doc.setFontSize(11);
             doc.setTextColor(100);
-            doc.text(tituloSetor, 14, y);
+            doc.text(fixEncoding(tituloSetor), 14, y);
             y += 8;
-            doc.text(`Gerado em: ${new Date().toLocaleString()}`, 14, y);
+            doc.text(fixEncoding(`Gerado em: ${new Date().toLocaleString()}`), 14, y);
             y += 10;
 
             // Itera pelos setores/grupos
             for (let grupo of dadosParaPDF) {
                 if (grupo.atendentes.length === 0) continue;
 
-                // Verifica se precisa de nova página
                 if (y > 260) {
                     doc.addPage();
                     y = 20;
@@ -215,10 +222,9 @@
                 // Cabeçalho do setor
                 doc.setFontSize(12);
                 doc.setTextColor(0);
-                doc.text(`📁 ${grupo.setor} (${grupo.atendentes.length} atendentes)`, 14, y);
+                doc.text(fixEncoding(`📁 ${grupo.setor} (${grupo.atendentes.length} atendentes)`), 14, y);
                 y += 6;
 
-                // Monta tabela
                 const bodyRows = grupo.atendentes.map((item, idx) => [idx+1, item.nome, item.services_count, item.setores]);
                 doc.autoTable({
                     startY: y,
@@ -247,8 +253,9 @@
             console.error(err);
             alert('❌ Erro ao gerar PDF: ' + err.message);
         } finally {
-            botao.disabled = false;
-            botao.innerHTML = originalText;
+            botaoModal.disabled = false;
+            botaoModal.innerHTML = originalText;
+            if (modalDiv) modalDiv.remove();
         }
     }
 
@@ -351,11 +358,11 @@
         })();
 
         content.querySelector('#modal-cancelar').onclick = () => modalDiv.remove();
-        content.querySelector('#modal-gerar').onclick = async () => {
+        const btnGerar = content.querySelector('#modal-gerar');
+        btnGerar.onclick = async () => {
             departamentoSelecionado = selectDept.value;
-            modalDiv.remove();
-            const fakeBtn = { disabled: false, innerText: 'Gerar PDF', style: {}, innerHTML: 'Gerar PDF' };
-            await gerarPDF(fakeBtn);
+            // Chama a geração passando o botão e o modal para fechar depois
+            await gerarPDF(btnGerar, modalDiv);
         };
         modalDiv.addEventListener('click', (e) => { if(e.target === modalDiv) modalDiv.remove(); });
     }
