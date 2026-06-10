@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Komunic - Ranking de Atendentes com PDF (agrupado por setor)
 // @namespace    http://tampermonkey.net/
-// @version      3.2
-// @description  Gera PDF bonito com ranking de atendentes, agrupado por setor, com loading e acentos corrigidos.
+// @version      4.0
+// @description  Gera PDF com ranking de atendentes, agrupado por setor, filtrando apenas ativos e com opção de excluir gestores.
 // @author       Gabriel
 // @match        https://app.komunic.net/*
 // @grant        GM_xmlhttpRequest
@@ -18,7 +18,7 @@
 
     const COR_PRINCIPAL = 'rgb(251 146 60 / 1)';
     const API_RANKING = 'https://app.komunic.net/dashboard/tenant/segmented?type=dashboard_segmented_by_attendant&order=desc&perPage=10';
-    const API_USERS = 'https://app.komunic.net/users';
+    const API_USERS = 'https://app.komunic.net/users?is_active=1'; // sempre apenas ativos
 
     const PERIODOS = {
         'today': 'Hoje',
@@ -29,8 +29,38 @@
     let periodoAtual = 'thirty_days';
     let todosDepartamentos = [];
     let departamentoSelecionado = 'todos';
+    let excluirGestores = false; // opção de excluir usuários com cargo "Gestores"
 
-    // Utilitários de requisição
+    // ========== FUNÇÃO PARA SANITIZAR TEXTO (SEM ACENTOS E SEM EMOJIS) ==========
+    function sanitizeText(str) {
+        if (!str) return '';
+        // Mapeamento manual de caracteres acentuados para equivalentes ASCII
+        const acentos = {
+            'á': 'a', 'à': 'a', 'ã': 'a', 'â': 'a', 'ä': 'a',
+            'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
+            'í': 'i', 'ì': 'i', 'î': 'i', 'ï': 'i',
+            'ó': 'o', 'ò': 'o', 'õ': 'o', 'ô': 'o', 'ö': 'o',
+            'ú': 'u', 'ù': 'u', 'û': 'u', 'ü': 'u',
+            'ç': 'c', 'ñ': 'n',
+            'Á': 'A', 'À': 'A', 'Ã': 'A', 'Â': 'A', 'Ä': 'A',
+            'É': 'E', 'È': 'E', 'Ê': 'E', 'Ë': 'E',
+            'Í': 'I', 'Ì': 'I', 'Î': 'I', 'Ï': 'I',
+            'Ó': 'O', 'Ò': 'O', 'Õ': 'O', 'Ô': 'O', 'Ö': 'O',
+            'Ú': 'U', 'Ù': 'U', 'Û': 'U', 'Ü': 'U',
+            'Ç': 'C', 'Ñ': 'N'
+        };
+        let resultado = '';
+        for (let char of str) {
+            resultado += acentos[char] || char;
+        }
+        // Remove emojis (faixa Unicode básica de emojis)
+        resultado = resultado.replace(/[\u{1F300}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '');
+        // Remove qualquer caractere que não seja ASCII imprimível (espaço, letras, números, pontuação)
+        resultado = resultado.replace(/[^\x20-\x7E]/g, '');
+        return resultado.trim();
+    }
+
+    // ========== REQUISIÇÕES ==========
     const csrf = () => decodeURIComponent((document.cookie.match(/XSRF-TOKEN=([^;]+)/) || [])[1] || '');
     const inertiaVersion = () => {
         const app = document.querySelector('#app');
@@ -71,14 +101,12 @@
         });
     });
 
-    // Busca paginada do ranking
+    // Buscar ranking paginado
     async function buscarRankingAtendentes() {
         let todos = [];
         let cursor = null;
         let hasMore = true;
-        let pagina = 1;
         const urlBase = `${API_RANKING}&period=${periodoAtual}`;
-        console.log(`Buscando ranking para período: ${PERIODOS[periodoAtual]}`);
         while (hasMore) {
             let url = urlBase;
             if (cursor) url += `&cursor=${cursor}`;
@@ -88,7 +116,6 @@
                     todos.push(...resp.data);
                     hasMore = resp.hasMorePages === true;
                     cursor = resp.nextCursor || null;
-                    pagina++;
                 } else break;
                 await new Promise(r => setTimeout(r, 200));
             } catch(err) {
@@ -99,14 +126,17 @@
         return todos;
     }
 
-    // Busca todos os usuários (com departamentos)
+    // Buscar todos os usuários (sempre ativos, pois API já tem ?is_active=1)
     async function buscarTodosUsuarios() {
         let todos = [];
         let cursor = null;
         let hasMore = true;
+        let urlBase = API_USERS;
         while (hasMore) {
-            let url = API_USERS;
-            if (cursor) url += `?cursor=${encodeURIComponent(cursor)}`;
+            let url = urlBase;
+            if (cursor) {
+                url += (url.includes('?') ? '&' : '?') + `cursor=${encodeURIComponent(cursor)}`;
+            }
             try {
                 const resp = await req(url);
                 const usersData = resp?.props?.users;
@@ -123,6 +153,12 @@
         return todos;
     }
 
+    // Verifica se o usuário tem o cargo "Gestores"
+    function isGestor(usuario) {
+        if (!usuario.roles) return false;
+        return usuario.roles.some(role => role.name === 'Gestores');
+    }
+
     function formatarDepartamentos(usuario) {
         if (!usuario.departments || usuario.departments.length === 0) return '';
         return usuario.departments.map(d => d.name).join(', ');
@@ -136,7 +172,6 @@
         return Array.from(set).sort();
     }
 
-    // Retorna array de objetos com { setor, atendentes[] }
     function agruparPorSetor(dadosCompletos) {
         const grupos = new Map();
         dadosCompletos.forEach(item => {
@@ -155,23 +190,12 @@
             .map(([setor, lista]) => ({ setor, atendentes: lista }));
     }
 
-    // Função para corrigir acentuação no jsPDF
-    function fixEncoding(str) {
-        if (!str) return '';
-        try {
-            return unescape(encodeURIComponent(str));
-        } catch(e) {
-            return str;
-        }
-    }
-
-    // Gerar PDF com suporte a agrupamento por setor e acentos corrigidos
+    // Gerar PDF
     async function gerarPDF(botaoModal, modalDiv) {
         const originalText = botaoModal.innerText;
         botaoModal.disabled = true;
         botaoModal.innerHTML = '<span style="display:inline-block; width:16px; height:16px; border:2px solid white; border-top-color:transparent; border-radius:50%; animation: spin 0.6s linear infinite; margin-right:8px;"></span> Gerando PDF...';
-        
-        // Adiciona estilo de animação se não existir
+
         if (!document.querySelector('#loading-spinner-style')) {
             const style = document.createElement('style');
             style.id = 'loading-spinner-style';
@@ -198,34 +222,35 @@
             const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
             let y = 20;
 
-            // Cabeçalho geral (com correção de encoding)
             doc.setFontSize(18);
             doc.setTextColor(251, 146, 60);
-            doc.text(fixEncoding(`Ranking de Atendentes - ${PERIODOS[periodoAtual]}`), 14, y);
+            doc.text(sanitizeText(`Ranking de Atendentes - ${PERIODOS[periodoAtual]}`), 14, y);
             y += 8;
             doc.setFontSize(11);
             doc.setTextColor(100);
-            doc.text(fixEncoding(tituloSetor), 14, y);
+            doc.text(sanitizeText(tituloSetor), 14, y);
             y += 8;
-            doc.text(fixEncoding(`Gerado em: ${new Date().toLocaleString()}`), 14, y);
+            doc.text(sanitizeText(`Gerado em: ${new Date().toLocaleString()}`), 14, y);
             y += 10;
 
-            // Itera pelos setores/grupos
             for (let grupo of dadosParaPDF) {
                 if (grupo.atendentes.length === 0) continue;
+                if (y > 260) { doc.addPage(); y = 20; }
 
-                if (y > 260) {
-                    doc.addPage();
-                    y = 20;
-                }
-
-                // Cabeçalho do setor
                 doc.setFontSize(12);
                 doc.setTextColor(0);
-                doc.text(fixEncoding(`📁 ${grupo.setor} (${grupo.atendentes.length} atendentes)`), 14, y);
+                const setorLimpo = sanitizeText(grupo.setor);
+                const tituloGrupo = `[Setor] ${setorLimpo} (${grupo.atendentes.length} atendentes)`;
+                doc.text(tituloGrupo, 14, y);
                 y += 6;
 
-                const bodyRows = grupo.atendentes.map((item, idx) => [idx+1, item.nome, item.services_count, item.setores]);
+                const bodyRows = grupo.atendentes.map((item, idx) => [
+                    idx+1,
+                    sanitizeText(item.nome),
+                    item.services_count,
+                    sanitizeText(item.setores)
+                ]);
+
                 doc.autoTable({
                     startY: y,
                     head: [['#', 'Atendente', 'Atendimentos', 'Setor(es)']],
@@ -240,7 +265,11 @@
                         2: { cellWidth: 30, halign: 'center' },
                         3: { cellWidth: 'auto' }
                     },
-                    didDrawPage: (data) => { y = data.cursor.y; }
+                    didParseCell: (data) => {
+                        if (data.cell && data.cell.text && data.cell.text.length > 0) {
+                            data.cell.text = [sanitizeText(data.cell.text[0])];
+                        }
+                    }
                 });
                 y = doc.lastAutoTable.finalY + 8;
                 if (y > 280) y = 20;
@@ -264,18 +293,28 @@
         const mapaUsuarios = new Map();
         usuarios.forEach(u => mapaUsuarios.set(u.id, u));
         todosDepartamentos = extrairDepartamentosUnicos(usuarios);
-        return ranking.map(r => {
+
+        // Aplica os filtros: apenas usuários ativos (já vêm da API) e opcionalmente exclui gestores
+        let dados = ranking.map(r => {
             const usuario = mapaUsuarios.get(r.id);
-            const setores = usuario ? formatarDepartamentos(usuario) : '';
+            if (!usuario) return null; // usuário não encontrado (ex: inativo ou não existe)
+            const setores = formatarDepartamentos(usuario);
             return {
                 id: r.id,
                 nome: r.name,
                 services_count: r.services_count,
                 setores: setores,
-                email: usuario?.email || '',
-                status: usuario?.status || ''
+                email: usuario.email,
+                status: usuario.status,
+                isGestor: isGestor(usuario)
             };
-        });
+        }).filter(item => item !== null);
+
+        if (excluirGestores) {
+            dados = dados.filter(item => !item.isGestor);
+            console.log(`Filtro aplicado: excluídos gestores. Restaram ${dados.length} atendentes.`);
+        }
+        return dados;
     }
 
     // Modal de configuração
@@ -290,7 +329,7 @@
         `;
         const content = document.createElement('div');
         content.style.cssText = `
-            background: white; border-radius: 16px; width: 400px; max-width: 90%;
+            background: white; border-radius: 16px; width: 420px; max-width: 90%;
             padding: 24px; box-shadow: 0 20px 25px -12px rgba(0,0,0,0.25);
             font-family: system-ui;
         `;
@@ -300,9 +339,15 @@
                 <label style="display:block; margin-bottom:6px; font-weight:500;">Período:</label>
                 <div id="modal-periodo-buttons" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
             </div>
-            <div style="margin-bottom:24px;">
+            <div style="margin-bottom:16px;">
                 <label style="display:block; margin-bottom:6px; font-weight:500;">Departamento:</label>
                 <select id="modal-departamento-select" style="width:100%; padding:8px; border:1px solid #ccc; border-radius:8px;"></select>
+            </div>
+            <div style="margin-bottom:24px;">
+                <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                    <input type="checkbox" id="modal-excluir-gestores">
+                    <span style="font-weight:500;">Excluir usuários com cargo "Gestores"</span>
+                </label>
             </div>
             <div style="display:flex; justify-content:flex-end; gap:12px;">
                 <button id="modal-cancelar" style="padding:8px 20px; background:#e5e7eb; border:none; border-radius:40px; cursor:pointer;">Cancelar</button>
@@ -361,7 +406,7 @@
         const btnGerar = content.querySelector('#modal-gerar');
         btnGerar.onclick = async () => {
             departamentoSelecionado = selectDept.value;
-            // Chama a geração passando o botão e o modal para fechar depois
+            excluirGestores = content.querySelector('#modal-excluir-gestores').checked;
             await gerarPDF(btnGerar, modalDiv);
         };
         modalDiv.addEventListener('click', (e) => { if(e.target === modalDiv) modalDiv.remove(); });
