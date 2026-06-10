@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Komunic - Painel de Respostas Rápidas (Persistente + Visual Aprimorado)
 // @namespace    http://tampermonkey.net/
-// @version      6.0
-// @description  Painel fixo à direita com pastas, respostas dinâmicas ({nome}, {saudacao}), não some ao trocar de abas, visual moderno.
+// @version      6.1
+// @description  Painel fixo à direita com pastas, respostas dinâmicas ({nome}, {saudacao}), não some ao trocar de abas, visual moderno, com exportação/importação.
 // @author       Gabriel Dal Prá
 // @match        https://app.komunic.net/newchat*
 // @grant        GM_setValue
@@ -49,6 +49,52 @@
     function gerarId() { return Date.now() + '-' + Math.random().toString(36).substr(2, 8); }
     function escapeHtml(str) {
         return String(str).replace(/[&<>]/g, m => m === '&' ? '&amp;' : (m === '<' ? '&lt;' : '&gt;'));
+    }
+
+    // ========== EXPORTAÇÃO / IMPORTAÇÃO ==========
+    function exportarDados() {
+        const jsonStr = JSON.stringify(pastas, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'komunic-respostas-backup.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+
+    function importarDados(arquivo) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            try {
+                const data = JSON.parse(e.target.result);
+                if (!validarEstruturaImportacao(data)) {
+                    alert('Arquivo inválido: estrutura das pastas/respostas não reconhecida.');
+                    return;
+                }
+                if (confirm('Isso substituirá TODAS as suas pastas e respostas atuais. Continuar?')) {
+                    pastas = data;
+                    saveData();
+                    renderizarPainel();
+                }
+            } catch (err) {
+                alert('Erro ao ler o arquivo. Certifique-se de que é um JSON válido.');
+            }
+        };
+        reader.readAsText(arquivo);
+    }
+
+    function validarEstruturaImportacao(data) {
+        return Array.isArray(data) && data.every(pasta =>
+            typeof pasta.nome === 'string' && pasta.nome.trim() !== '' &&
+            Array.isArray(pasta.respostas) &&
+            pasta.respostas.every(r =>
+                typeof r.titulo === 'string' &&
+                typeof r.texto === 'string'
+            )
+        );
     }
 
     // ========== FUNÇÕES DO CHAT ==========
@@ -212,7 +258,7 @@
         };
     }
 
-    // ========== RENDERIZAÇÃO DO PAINEL (VISUAL MODERNO) ==========
+    // ========== RENDERIZAÇÃO DO PAINEL (VISUAL MODERNO + EXPORT/IMPORT) ==========
     function renderizarPainel() {
         const container = document.querySelector('#painel-respostas-rapidas');
         if (!container) return;
@@ -221,14 +267,41 @@
         // Cabeçalho
         const header = document.createElement('div');
         header.style.cssText = `background: ${COR_PRINCIPAL}; color: white; padding: 14px 16px; font-weight: bold; display: flex; justify-content: space-between; align-items: center; border-radius: 12px 12px 0 0;`;
-        header.innerHTML = `<span style="font-size: 15px;">📁 Respostas Rápidas</span><button id="btn-add-pasta-painel" style="background:rgba(255,255,255,0.2); border:none; color:white; font-size:16px; padding:4px 12px; border-radius:20px; cursor:pointer;">+ Pasta</button>`;
+        header.innerHTML = `
+            <span style="font-size: 15px;">📁 Respostas Rápidas</span>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <button id="btn-exportar" title="Exportar pastas" style="background:rgba(255,255,255,0.2); border:none; color:white; font-size:16px; padding:4px 8px; border-radius:20px; cursor:pointer;">⬇️</button>
+                <button id="btn-importar" title="Importar pastas" style="background:rgba(255,255,255,0.2); border:none; color:white; font-size:16px; padding:4px 8px; border-radius:20px; cursor:pointer;">⬆️</button>
+                <button id="btn-add-pasta-painel" style="background:rgba(255,255,255,0.2); border:none; color:white; font-size:16px; padding:4px 12px; border-radius:20px; cursor:pointer;">+ Pasta</button>
+            </div>
+        `;
         container.appendChild(header);
 
         const corpo = document.createElement('div');
         corpo.style.cssText = 'padding: 12px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 12px; background: #f9fafb;';
         container.appendChild(corpo);
 
+        // Eventos dos botões do cabeçalho
         header.querySelector('#btn-add-pasta-painel').onclick = () => abrirModalPasta(null, '');
+        header.querySelector('#btn-exportar').onclick = exportarDados;
+        header.querySelector('#btn-importar').onclick = () => {
+            // Cria o input file se não existir (reutilizável)
+            if (!window.__komunicFileInput) {
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.json';
+                input.style.display = 'none';
+                input.addEventListener('change', (e) => {
+                    if (e.target.files.length > 0) {
+                        importarDados(e.target.files[0]);
+                        e.target.value = ''; // permite importar o mesmo arquivo novamente
+                    }
+                });
+                document.body.appendChild(input);
+                window.__komunicFileInput = input;
+            }
+            window.__komunicFileInput.click();
+        };
 
         if (pastas.length === 0) {
             const vazio = document.createElement('div');
@@ -320,9 +393,8 @@
         });
     }
 
-    // ========== GERENCIAMENTO DE PERSISTÊNCIA (NÃO SOME AO TROCAR DE ABA) ==========
+    // ========== GERENCIAMENTO DE PERSISTÊNCIA ==========
     function criarPainelLateral() {
-        // Remove painel existente se houver
         const painelExistente = document.querySelector('#painel-respostas-rapidas');
         if (painelExistente) painelExistente.remove();
 
@@ -332,7 +404,6 @@
         const containerPai = chatPanel.closest('.px-3');
         if (!containerPai) return;
 
-        // Aplica layout flex se necessário
         if (!containerPai.style.display || containerPai.style.display !== 'flex') {
             containerPai.style.display = 'flex';
             containerPai.style.gap = '16px';
@@ -359,7 +430,6 @@
 
     function tryCreatePanel() {
         if (isChatPage()) {
-            // Aguarda o #newchat-panel existir no DOM
             const checkExist = setInterval(() => {
                 if (document.querySelector('#newchat-panel')) {
                     clearInterval(checkExist);
@@ -372,7 +442,7 @@
         }
     }
 
-    // Observador de URL (para navegação SPA)
+    // Observador de URL
     let lastUrl = location.href;
     const urlObserver = new MutationObserver(() => {
         if (location.href !== lastUrl) {
@@ -382,7 +452,7 @@
     });
     urlObserver.observe(document, { subtree: true, childList: true });
 
-    // Observador de DOM (para quando o container aparecer)
+    // Observador de DOM
     const domObserver = new MutationObserver(() => {
         if (isChatPage() && document.querySelector('#newchat-panel') && !document.querySelector('#painel-respostas-rapidas')) {
             criarPainelLateral();
