@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Komunic - Painel de Respostas Rápidas (Persistente + Visual Aprimorado)
 // @namespace    http://tampermonkey.net/
-// @version      6.3
+// @version      6.4
 // @description  Painel fixo à direita com pastas, respostas dinâmicas ({nome}, {saudacao}), não some ao trocar de abas, visual moderno, com exportação/importação.
 // @author       Gabriel Dal Prá
 // @match        https://app.komunic.net/newchat*
@@ -15,7 +15,7 @@
 (function() {
     'use strict';
 
-    const COR_PRINCIPAL = 'rgb(251 146 60 / 1)';
+    const COR_PRINCIPAL = 'rgb(31 221 9 / 1)';
     const STORAGE_KEY = 'komunic_respostas_pastas';
     let pastas;
 
@@ -352,7 +352,7 @@
             pasta.respostas.forEach(resp => {
                 const respItem = document.createElement('div');
                 respItem.style.cssText = 'padding: 10px; border: 1px solid #e5e7eb; border-radius: 10px; cursor: pointer; background: white; transition: all 0.2s;';
-                respItem.onmouseover = () => respItem.style.backgroundColor = '#fef9e6';
+                respItem.onmouseover = () => respItem.style.backgroundColor = '#e8ffe5';
                 respItem.onmouseout = () => respItem.style.backgroundColor = 'white';
                 respItem.innerHTML = `
                     <div style="display: flex; justify-content: space-between; align-items: center;">
