@@ -1,9 +1,9 @@
 
  // ==UserScript==
- // @name         Komunic - Histórico do Contato (Rolagem Infinita)
+ // @name         Komunic - Histórico do Contato (Rolagem Infinita + Mídias)
  // @namespace    http://tampermonkey.net/
- // @version      3.7
- // @description  Histórico de atendimentos e mensagens com paginação por cursor
+ // @version      3.8
+ // @description  Histórico de atendimentos com mensagens, mídias e rolagem infinita
  // @author       Gabriel
  // @match        https://app.komunic.net/*
  // @grant        GM_xmlhttpRequest
@@ -13,477 +13,565 @@
 (function () {
   'use strict';
 
-  const COR_PRINCIPAL = '#1fdd09';
   const BASE = 'https://app.komunic.net';
-  const LIMITE_MENSAGENS = 10;
+  const COR = '#1fdd09';
+  const LIMITE = 10;
 
-  const escapeHtml = (value) =>
-    String(value ?? '').replace(/[&<>"']/g, (char) => ({
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;'
-    }[char]));
+  const escapeHtml = valor =>
+    String(valor ?? '').replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;',
+      '"': '&quot;', "'": '&#39;'
+    }[c]));
 
-  const normalizarNome = (nome) =>
-    String(nome || '')
-      .trim()
-      .replace(/\s+/g, ' ')
+  const normalizar = valor =>
+    String(valor || '').trim().replace(/\s+/g, ' ')
       .toLocaleLowerCase('pt-BR');
 
-  const getNomeContato = () => {
+  const criar = (tag, classe = '', texto = '') => {
+    const el = document.createElement(tag);
+    el.className = classe;
+    el.textContent = texto;
+    return el;
+  };
+
+  function nomeContatoAtual() {
     return document.querySelector(
       '[data-testid="chat-top-contact-name"]'
     )?.textContent?.trim() || '';
-  };
-
-  const csrf = () => {
-    const match = document.cookie.match(/(?:^|;\s*)XSRF-TOKEN=([^;]+)/);
-    if (!match) return '';
-    try {
-      return decodeURIComponent(match[1]);
-    } catch {
-      return match[1];
-    }
-  };
-
-
- const inertiaVersion = () => {
-   try {
-     const elemento = document.querySelector(
-       'script[data-page="app"][type="application/json"]'
-     );
- 
-     if (!elemento) return '';
- 
-     const dados = JSON.parse(elemento.textContent);
-     return dados.version || '';
- 
-   } catch (erro) {
-     console.error('[Komunic] Erro ao obter versão Inertia:', erro);
-     return '';
-   }
- };
-
-
-  
-const req = (url) => new Promise((resolve, reject) => {
-  const isPesquisa =
-    /\/live-history\/contact\?/.test(url);
-
-  const headers = {
-    accept: isPesquisa
-      ? 'text/html, application/xhtml+xml'
-      : 'application/json, text/plain, */*',
-    'x-requested-with': 'XMLHttpRequest'
-  };
-
-  const token = csrf();
-
-  if (token) {
-    headers['x-xsrf-token'] = token;
   }
 
- if (isPesquisa) {
-   headers['x-inertia'] = 'true';
-   headers['x-inertia-version'] = inertiaVersion();
-   headers['x-inertia-partial-component'] =
-     'Tenant/LiveCallHistoryContact';
-   headers['x-inertia-partial-data'] = 'contacts';
- }
+  function csrf() {
+    const token = document.cookie.match(
+      /(?:^|;\s*)XSRF-TOKEN=([^;]+)/
+    );
+    if (!token) return '';
+    try {
+      return decodeURIComponent(token[1]);
+    } catch {
+      return token[1];
+    }
+  }
 
-  GM_xmlhttpRequest({
-    method: 'GET',
-    url,
-    headers,
-    responseType: 'json',
-    timeout: 20000,
+  function versaoInertia() {
+    try {
+      const script = document.querySelector(
+        'script[data-page="app"][type="application/json"]'
+      );
+      return script
+        ? JSON.parse(script.textContent).version || ''
+        : '';
+    } catch {
+      return '';
+    }
+  }
 
-    onload: (response) => {
-      if (response.status === 409) {
-        reject(new Error(
-          'HTTP 409: conflito de versão ou contexto Inertia'
-        ));
-        return;
+  function requisicao(url) {
+    return new Promise((resolve, reject) => {
+      const pesquisa = /\/live-history\/contact\?/.test(url);
+      const headers = {
+        accept: pesquisa
+          ? 'text/html, application/xhtml+xml'
+          : 'application/json, text/plain, */*',
+        'x-requested-with': 'XMLHttpRequest'
+      };
+
+      const token = csrf();
+      if (token) headers['x-xsrf-token'] = token;
+
+      if (pesquisa) {
+        headers['x-inertia'] = 'true';
+        headers['x-inertia-version'] = versaoInertia();
+        headers['x-inertia-partial-component'] =
+          'Tenant/LiveCallHistoryContact';
+        headers['x-inertia-partial-data'] = 'contacts';
       }
 
-      if (response.status < 200 || response.status >= 300) {
-        reject(new Error(`HTTP ${response.status}`));
-        return;
-      }
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url,
+        headers,
+        responseType: 'json',
+        timeout: 20000,
+        onload: resposta => {
+          if (resposta.status < 200 || resposta.status >= 300) {
+            reject(new Error(`HTTP ${resposta.status}`));
+            return;
+          }
+          try {
+            const dados = resposta.response ??
+              JSON.parse(resposta.responseText);
+            resolve(typeof dados === 'string'
+              ? JSON.parse(dados) : dados);
+          } catch {
+            reject(new Error('Resposta JSON inválida'));
+          }
+        },
+        onerror: () => reject(new Error('Erro de conexão')),
+        ontimeout: () => reject(new Error('Tempo excedido'))
+      });
+    });
+  }
 
-      try {
-        let data = response.response;
-
-        if (typeof data === 'string') {
-          data = JSON.parse(data);
-        }
-
-        if (data == null) {
-          data = JSON.parse(response.responseText);
-        }
-
-        resolve(data);
-      } catch {
-        reject(new Error('Resposta JSON inválida'));
-      }
-    },
-
-    ontimeout: () =>
-      reject(new Error('Tempo limite excedido')),
-
-    onerror: () =>
-      reject(new Error('Erro de conexão'))
-  });
-});
-
-
-  function extrairLista(data, tipo) {
+  function listaDados(data, tipo) {
     if (Array.isArray(data)) return data;
 
-    const candidates = tipo === 'contatos'
-      ? [
-          data?.props?.contacts?.data,
-          data?.props?.contacts,
-          data?.contacts?.data,
-          data?.contacts,
-          data?.data?.contacts,
-          data?.data
-        ]
-      : tipo === 'atendimentos'
-      ? [
-          data?.props?.sessions?.data,
-          data?.props?.histories?.data,
-          data?.props?.attendances?.data,
-          data?.sessions?.data,
-          data?.histories?.data,
-          data?.attendances?.data,
-          data?.sessions,
-          data?.histories,
-          data?.attendances,
-          data?.data?.data,
-          data?.data
-        ]
-      : [
-          data?.messages?.data,
-          data?.messages,
-          data?.data?.messages,
-          data?.data?.data,
-          data?.data
-        ];
+    const candidatos = tipo === 'contatos' ? [
+      data?.props?.contacts?.data,
+      data?.props?.contacts,
+      data?.contacts?.data,
+      data?.contacts,
+      data?.data?.contacts,
+      data?.data
+    ] : tipo === 'atendimentos' ? [
+      data?.props?.sessions?.data,
+      data?.props?.histories?.data,
+      data?.props?.attendances?.data,
+      data?.sessions?.data,
+      data?.histories?.data,
+      data?.attendances?.data,
+      data?.sessions,
+      data?.histories,
+      data?.attendances,
+      data?.data?.data,
+      data?.data
+    ] : [
+      data?.messages?.data,
+      data?.messages,
+      data?.data?.messages,
+      data?.data?.data,
+      data?.data
+    ];
 
-    return candidates.find(Array.isArray) || [];
+    return candidatos.find(Array.isArray) || [];
   }
 
-  function extrairPaginacao(data, tipo, quantidade, limite) {
-    const candidates = tipo === 'atendimentos'
-      ? [
-          data?.props?.sessions,
-          data?.props?.histories,
-          data?.props?.attendances,
-          data?.sessions,
-          data?.histories,
-          data?.attendances,
-          data?.data,
-          data
-        ]
-      : [
-          data?.pagination,
-          data?.messages,
-          data?.data?.messages,
-          data?.data,
-          data
-        ];
+  function paginacao(data, tipo, quantidade, limite) {
+    const candidatos = tipo === 'atendimentos' ? [
+      data?.props?.sessions,
+      data?.props?.histories,
+      data?.props?.attendances,
+      data?.sessions,
+      data?.histories,
+      data?.attendances,
+      data?.data,
+      data
+    ] : [
+      data?.pagination,
+      data?.messages,
+      data?.data?.messages,
+      data?.data,
+      data
+    ];
 
-    const meta = candidates.find((item) =>
-      item &&
-      typeof item === 'object' &&
-      !Array.isArray(item) &&
+    const meta = candidatos.find(v =>
+      v && typeof v === 'object' && !Array.isArray(v) &&
       (
-        item.current_page !== undefined ||
-        item.last_page !== undefined ||
-        item.next_page_url !== undefined ||
-        item.has_more !== undefined ||
-        item.next_cursor !== undefined
+        v.current_page !== undefined ||
+        v.last_page !== undefined ||
+        v.next_page_url !== undefined ||
+        v.has_more !== undefined ||
+        v.next_cursor !== undefined
       )
     );
 
-    if (meta) {
-      if (tipo === 'mensagens') {
-        return {
-          mais: meta.has_more === true && Boolean(meta.next_cursor),
-          cursor: meta.next_cursor || null
-        };
-      }
-
-      if (meta.next_page_url !== undefined) {
-        return { mais: Boolean(meta.next_page_url) };
-      }
-
-      if (meta.has_more !== undefined) {
-        return { mais: Boolean(meta.has_more) };
-      }
-
-      if (meta.current_page !== undefined &&
-          meta.last_page !== undefined) {
-        return {
-          mais: Number(meta.current_page) < Number(meta.last_page)
-        };
-      }
-    }
-
     if (tipo === 'mensagens') {
-      return { mais: false, cursor: null, estimado: true };
+      return {
+        mais: meta?.has_more === true &&
+          Boolean(meta?.next_cursor),
+        cursor: meta?.next_cursor || null,
+        estimado: !meta
+      };
     }
 
-    return {
-      mais: quantidade >= limite,
-      estimado: true
-    };
+    if (meta?.next_page_url !== undefined) {
+      return { mais: Boolean(meta.next_page_url) };
+    }
+    if (meta?.has_more !== undefined) {
+      return { mais: Boolean(meta.has_more) };
+    }
+    if (meta?.current_page !== undefined &&
+        meta?.last_page !== undefined) {
+      return {
+        mais: Number(meta.current_page) <
+          Number(meta.last_page)
+      };
+    }
+
+    return { mais: quantidade >= limite, estimado: true };
   }
 
   async function buscarContato(nome) {
     const termo = nome.split(/[\s\-–—]/)[0].trim();
-
-    const data = await req(
-      `${BASE}/live-history/contact?term=${encodeURIComponent(termo)}`
+    const dados = await requisicao(
+      `${BASE}/live-history/contact?term=${
+        encodeURIComponent(termo)
+      }`
     );
-
-    return extrairLista(data, 'contatos');
+    return listaDados(dados, 'contatos');
   }
 
   async function buscarAtendimentos(id, pagina) {
-    const data = await req(
-      `${BASE}/live-history/contact/${encodeURIComponent(id)}` +
-      `?page=${pagina}&term=`
+    const dados = await requisicao(
+      `${BASE}/live-history/contact/${
+        encodeURIComponent(id)
+      }?page=${pagina}&term=`
     );
-
-    const lista = extrairLista(data, 'atendimentos');
-
+    const lista = listaDados(dados, 'atendimentos');
     return {
       lista,
-      paginacao: extrairPaginacao(
-        data, 'atendimentos', lista.length, 15
-      )
+      paginacao: paginacao(dados, 'atendimentos',
+        lista.length, 15)
     };
   }
 
   async function buscarMensagens(id, cursor = null) {
-    let url =
-      `${BASE}/live-history-chat/${encodeURIComponent(id)}` +
-      `?limit=${LIMITE_MENSAGENS}`;
+    let url = `${BASE}/live-history-chat/${
+      encodeURIComponent(id)
+    }?limit=${LIMITE}`;
 
-    if (cursor) {
-      url += `&cursor=${encodeURIComponent(cursor)}`;
-    }
+    if (cursor) url += `&cursor=${encodeURIComponent(cursor)}`;
 
-    const data = await req(url);
-    const lista = extrairLista(data, 'mensagens');
+    const dados = await requisicao(url);
+    const lista = listaDados(dados, 'mensagens');
 
     return {
       lista,
-      paginacao: extrairPaginacao(
-        data, 'mensagens', lista.length, LIMITE_MENSAGENS
-      )
+      paginacao: paginacao(dados, 'mensagens',
+        lista.length, LIMITE)
     };
   }
 
-  const estilos = `
+  const css = `
     #modal-historico {
-      position: fixed;
-      inset: 0;
-      background: rgba(0,0,0,.6);
-      z-index: 100002;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      backdrop-filter: blur(2px);
-      font-family: Inter, system-ui, sans-serif;
+      position:fixed;inset:0;z-index:100002;
+      display:flex;align-items:center;justify-content:center;
+      background:rgba(0,0,0,.6);
+      font-family:Inter,system-ui,sans-serif;
     }
-
-    #modal-historico * {
-      box-sizing: border-box;
-    }
-
+    #modal-historico * {box-sizing:border-box}
     #modal-historico .historico-content {
-      width: 95%;
-      max-width: 850px;
-      height: 85vh;
-      max-height: 850px;
-      background: white;
-      border-radius: 16px;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      box-shadow: 0 20px 40px rgba(0,0,0,.2);
+      width:95%;max-width:850px;height:85vh;
+      max-height:850px;background:white;border-radius:16px;
+      display:flex;flex-direction:column;overflow:hidden;
+      box-shadow:0 20px 40px rgba(0,0,0,.2);
     }
-
     #modal-historico .historico-header {
-      background: ${COR_PRINCIPAL};
-      color: #102010;
-      padding: 14px 20px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-weight: 700;
-      flex-shrink: 0;
+      background:${COR};color:#102010;padding:14px 20px;
+      display:flex;align-items:center;
+      justify-content:space-between;font-weight:700;
     }
-
     #modal-historico .historico-fechar {
-      border: none;
-      background: transparent;
-      color: #102010;
-      font-size: 26px;
-      cursor: pointer;
+      border:0;background:transparent;font-size:26px;
+      cursor:pointer;
     }
-
     #modal-historico .historico-lista {
-      flex: 1;
-      overflow-y: auto;
-      padding: 16px;
-      min-height: 0;
+      flex:1;min-height:0;overflow-y:auto;padding:16px;
     }
-
     #modal-historico .historico-card {
-      border: 1px solid #e5e7eb;
-      border-radius: 12px;
-      overflow: hidden;
-      background: #fafafa;
-      margin-bottom: 12px;
+      border:1px solid #e5e7eb;border-radius:12px;
+      overflow:hidden;background:#fafafa;margin-bottom:12px;
     }
-
     #modal-historico .historico-card-topo {
-      background: #f3f4f6;
-      padding: 12px;
-      font-size: 13px;
-      line-height: 1.6;
+      background:#f3f4f6;padding:12px;
+      font-size:13px;line-height:1.6;
     }
-
     #modal-historico .historico-card-corpo {
-      padding: 10px 12px;
+      padding:10px 12px;
     }
-
     #modal-historico .historico-botao {
-      background: ${COR_PRINCIPAL};
-      color: #102010;
-      border: none;
-      border-radius: 20px;
-      padding: 8px 14px;
-      font-size: 12px;
-      font-weight: 600;
-      cursor: pointer;
+      background:${COR};border:0;border-radius:20px;
+      padding:8px 14px;font-size:12px;font-weight:600;
+      cursor:pointer;
     }
-
     #modal-historico .historico-mensagens {
-      display: none;
-      max-height: 350px;
-      overflow-y: auto;
-      margin-top: 12px;
-      padding: 6px;
-      background: #fff;
-      border: 1px solid #e5e7eb;
-      border-radius: 10px;
+      display:none;max-height:350px;overflow-y:auto;
+      margin-top:12px;padding:6px;background:white;
+      border:1px solid #e5e7eb;border-radius:10px;
     }
-
     #modal-historico .historico-mensagem {
-      display: flex;
-      margin-bottom: 8px;
+      display:flex;margin-bottom:8px;
     }
-
     #modal-historico .historico-balao {
-      max-width: 80%;
-      border-radius: 14px;
-      padding: 9px 12px;
-      font-size: 12px;
-      overflow-wrap: anywhere;
+      max-width:80%;border-radius:14px;padding:9px 12px;
+      font-size:12px;overflow-wrap:anywhere;
     }
-
     #modal-historico .historico-aviso {
-      padding: 12px;
-      text-align: center;
-      color: #6b7280;
-      font-size: 12px;
+      padding:12px;text-align:center;
+      color:#6b7280;font-size:12px;
     }
-
-    #modal-historico .historico-erro {
-      color: #dc2626;
+    #modal-historico .historico-midia img {
+      display:block;max-width:100%;max-height:300px;
+      border-radius:8px;cursor:zoom-in;
+    }
+    #modal-historico .historico-midia video {
+      max-width:100%;max-height:300px;border-radius:8px;
+    }
+    #modal-historico .historico-midia audio {
+      max-width:100%;width:270px;
+    }
+    #modal-historico .historico-midia a {
+      color:#1d4ed8;text-decoration:underline;
     }
   `;
 
-  if (!document.querySelector('#komunic-historico-estilos')) {
-    const style = document.createElement('style');
-    style.id = 'komunic-historico-estilos';
-    style.textContent = estilos;
-    document.head.appendChild(style);
-  }
+  const style = criar('style');
+  style.id = 'komunic-historico-estilos';
+  style.textContent = css;
+  document.querySelector('#komunic-historico-estilos')?.remove();
+  document.head.appendChild(style);
 
   let modalAtual = null;
+  let sessaoMidias = null;
 
   function fecharModal() {
+    if (sessaoMidias) {
+      sessaoMidias.encerrar();
+      sessaoMidias = null;
+    }
     modalAtual?.remove();
     modalAtual = null;
   }
 
-  function criarElemento(tag, classe, texto = '') {
-    const el = document.createElement(tag);
-    if (classe) el.className = classe;
-    if (texto) el.textContent = texto;
-    return el;
+  function gerenciadorMidias() {
+    const urls = new Set();
+    const controllers = new Set();
+    const pendentes = new Set();
+    let encerrado = false;
+
+    const observer = new IntersectionObserver(entradas => {
+      for (const entrada of entradas) {
+        if (!entrada.isIntersecting) continue;
+        observer.unobserve(entrada.target);
+        pendentes.delete(entrada.target);
+        entrada.target._carregar?.();
+      }
+    }, { rootMargin: '250px' });
+
+    return {
+      observar(el) {
+        if (encerrado) return;
+        pendentes.add(el);
+        observer.observe(el);
+      },
+      async carregar(m, container, aviso) {
+        if (encerrado || !container.isConnected) return;
+
+        const controller = new AbortController();
+        controllers.add(controller);
+        aviso.textContent = '⏳ Carregando anexo...';
+
+        const caminho =
+          `/messages/${encodeURIComponent(m.id)}?inline=1`;
+
+        try {
+          const resposta = await fetch(caminho, {
+            credentials: 'same-origin',
+            headers: { Accept: '*/*' },
+            signal: controller.signal
+          });
+
+          if (!resposta.ok) {
+            throw new Error(`HTTP ${resposta.status}`);
+          }
+
+          const blob = await resposta.blob();
+
+          if (encerrado || !container.isConnected) return;
+
+          const url = URL.createObjectURL(blob);
+          urls.add(url);
+
+          const tipo = String(m.type || '').toLowerCase();
+          const mime = String(blob.type || '').toLowerCase();
+          const nome = String(m.file_name || 'Arquivo');
+
+          let elemento;
+
+          if (tipo === 'image' || mime.startsWith('image/')) {
+            elemento = criar('img');
+            elemento.src = url;
+            elemento.alt = nome;
+            elemento.loading = 'lazy';
+            elemento.title = 'Clique para ampliar';
+            elemento.addEventListener('click', () => {
+              window.open(url, '_blank', 'noopener');
+            });
+
+          } else if (
+            ['audio', 'ptt', 'voice'].includes(tipo) ||
+            mime.startsWith('audio/')
+          ) {
+            elemento = criar('audio');
+            elemento.controls = true;
+            elemento.preload = 'metadata';
+            elemento.src = url;
+
+          } else if (
+            tipo === 'video' || mime.startsWith('video/')
+          ) {
+            elemento = criar('video');
+            elemento.controls = true;
+            elemento.preload = 'metadata';
+            elemento.src = url;
+
+          } else {
+            elemento = criar('a', '', `📄 Abrir ${nome}`);
+            elemento.href = url;
+            elemento.target = '_blank';
+            elemento.rel = 'noopener noreferrer';
+          }
+
+          aviso.replaceWith(elemento);
+
+        } catch (erro) {
+          if (erro.name === 'AbortError') return;
+
+          aviso.textContent =
+            `⚠️ Não foi possível carregar (${erro.message}). `;
+
+          const abrir = criar('a', '', 'Tentar abrir');
+          abrir.href = caminho;
+          abrir.target = '_blank';
+          abrir.rel = 'noopener noreferrer';
+          aviso.appendChild(abrir);
+
+        } finally {
+          controllers.delete(controller);
+        }
+      },
+      encerrar() {
+        encerrado = true;
+        observer.disconnect();
+        pendentes.clear();
+
+        for (const controller of controllers) controller.abort();
+        controllers.clear();
+
+        for (const url of urls) URL.revokeObjectURL(url);
+        urls.clear();
+      }
+    };
   }
 
-  function formatarData(data) {
-    if (!data) return '—';
-    return String(data);
+  function dataMensagem(valor) {
+    if (!valor) return '';
+    const d = new Date(valor);
+    return Number.isNaN(d.getTime())
+      ? String(valor)
+      : d.toLocaleString('pt-BR');
   }
 
-  function formatarDataMensagem(data) {
-    if (!data) return '';
+  function criarMensagem(m, nomeContato) {
+    const remetente = String(
+      m.sender?.name || (m.from_me ? 'Atendente' : 'Cliente')
+    );
 
-    const date = new Date(data);
+    const primeiroNome = normalizar(nomeContato).split(' ')[0];
+    const nomeRemetente = normalizar(remetente);
 
-    return Number.isNaN(date.getTime())
-      ? String(data)
-      : date.toLocaleString('pt-BR');
+    const isCliente = Boolean(primeiroNome) && (
+      nomeRemetente === normalizar(nomeContato) ||
+      nomeRemetente.split(' ')[0] === primeiroNome
+    );
+
+    const esquerda = m.from_me === false ||
+      (m.from_me == null && isCliente);
+
+    const item = criar('div', 'historico-mensagem');
+    item.style.justifyContent = esquerda
+      ? 'flex-start' : 'flex-end';
+
+    const balao = criar('div', 'historico-balao');
+    balao.style.background = esquerda
+      ? '#f3f4f6' : '#dbeafe';
+
+    const cabecalho = criar('div', '', remetente);
+    cabecalho.style.cssText =
+      'font-weight:700;font-size:11px;margin-bottom:4px';
+    balao.appendChild(cabecalho);
+
+    const tipo = String(m.type || 'text').toLowerCase();
+    const temArquivo = Boolean(
+      m.id && m.file_s3 &&
+      !['deleted', 'deleting'].includes(tipo)
+    );
+
+    let texto = String(m.text || '');
+    const prefixo = `*${remetente}*:`;
+
+    if (texto.startsWith(prefixo)) {
+      texto = texto.slice(prefixo.length).trim();
+    }
+
+    if (texto || !temArquivo) {
+      const conteudo = criar(
+        'div', '', texto || '[Mensagem não textual]'
+      );
+      conteudo.style.whiteSpace = 'pre-wrap';
+      balao.appendChild(conteudo);
+    }
+
+    if (temArquivo) {
+      const midia = criar('div', 'historico-midia');
+      midia.style.marginTop = '7px';
+
+      const nome = criar(
+        'div', '', String(m.file_name || 'Anexo')
+      );
+      nome.style.cssText =
+        'font-size:11px;color:#475569;margin-bottom:5px';
+
+      const aviso = criar(
+        'div', '', '⏳ Aguardando mídia...'
+      );
+      aviso.style.cssText =
+        'font-size:12px;color:#64748b';
+
+      midia.append(nome, aviso);
+      balao.appendChild(midia);
+
+      midia._carregar = () =>
+        sessaoMidias?.carregar(m, midia, aviso);
+
+      sessaoMidias?.observar(midia);
+    }
+
+    const horario = criar(
+      'div', '', dataMensagem(m.created_at)
+    );
+    horario.style.cssText =
+      'font-size:10px;color:#6b7280;margin-top:6px';
+
+    balao.appendChild(horario);
+    item.appendChild(balao);
+    return item;
   }
 
   function criarCard(atendimento, nomeContato) {
-    const card = criarElemento('div', 'historico-card');
-    const topo = criarElemento('div', 'historico-card-topo');
+    const card = criar('div', 'historico-card');
+    const topo = criar('div', 'historico-card-topo');
 
     const status = atendimento.status || 'desconhecido';
-
     const corStatus = status === 'closed'
-      ? '#10b981'
-      : status === 'open'
-      ? COR_PRINCIPAL
-      : '#6b7280';
+      ? '#10b981' : status === 'open' ? COR : '#6b7280';
 
     topo.innerHTML = `
       <div style="display:flex;justify-content:space-between;gap:8px">
-        <strong>
-          🔖 Protocolo:
+        <strong>🔖 Protocolo:
           ${escapeHtml(atendimento.protocol || 'N/A')}
         </strong>
         <span>
-          <span style="
-            display:inline-block;
-            width:9px;
-            height:9px;
-            border-radius:50%;
-            background:${corStatus};
-          "></span>
+          <span style="display:inline-block;width:9px;height:9px;
+            border-radius:50%;background:${corStatus}"></span>
           ${escapeHtml(status)}
         </span>
       </div>
-
       <div style="color:#4b5563">
-        📅 ${escapeHtml(formatarData(atendimento.date_start))}
+        📅 ${escapeHtml(atendimento.date_start || '—')}
         ${atendimento.date_end
-          ? ' → ' + escapeHtml(formatarData(atendimento.date_end))
+          ? ' → ' + escapeHtml(atendimento.date_end)
           : ' (em andamento)'}
       </div>
-
       <div style="color:#4b5563">
         👤 ${escapeHtml(atendimento.attendant?.name || '—')}
         |
@@ -491,17 +579,13 @@ const req = (url) => new Promise((resolve, reject) => {
       </div>
     `;
 
-    const corpo = criarElemento('div', 'historico-card-corpo');
-
-    const botao = criarElemento(
-      'button',
-      'historico-botao',
-      '💬 Ver mensagens'
+    const corpo = criar('div', 'historico-card-corpo');
+    const botao = criar(
+      'button', 'historico-botao', '💬 Ver mensagens'
     );
     botao.type = 'button';
 
-    const area = criarElemento('div', 'historico-mensagens');
-
+    const area = criar('div', 'historico-mensagens');
     corpo.append(botao, area);
     card.append(topo, corpo);
 
@@ -516,99 +600,27 @@ const req = (url) => new Promise((resolve, reject) => {
       cursoresUsados: new Set()
     };
 
-    function chaveMensagem(m) {
-      return String(
-        m.id ??
-        m.uuid ??
-        [
-          m.created_at,
-          m.sender?.name,
-          m.text,
-          m.from_me
-        ].join('|')
-      );
-    }
-
-    function criarMensagem(m) {
-      const nomeRemetente = String(
-        m.sender?.name || (m.from_me ? 'Atendente' : 'Cliente')
-      );
-
-      const primeiroNome = nomeContato.toLowerCase().split(' ')[0];
-      const remetente = nomeRemetente.toLowerCase();
-
-      const isCliente = Boolean(primeiroNome) &&
-        (
-          remetente === nomeContato.toLowerCase() ||
-          remetente.split(' ')[0] === primeiroNome
-        );
-
-      const lado = m.from_me === true
-        ? 'flex-end'
-        : m.from_me === false
-        ? 'flex-start'
-        : isCliente
-        ? 'flex-start'
-        : 'flex-end';
-
-      const bg = lado === 'flex-start'
-        ? '#f3f4f6'
-        : '#dbeafe';
-
-      const item = criarElemento('div', 'historico-mensagem');
-      item.style.justifyContent = lado;
-
-      const balao = criarElemento('div', 'historico-balao');
-      balao.style.background = bg;
-
-      let texto = String(m.text || '[Mensagem não textual]');
-      const prefixo = `*${nomeRemetente}*:`;
-
-      if (texto.startsWith(prefixo)) {
-        texto = texto.slice(prefixo.length).trim();
-      }
-
-      balao.innerHTML = `
-        <div style="
-          font-weight:700;
-          font-size:11px;
-          margin-bottom:4px
-        ">
-          ${escapeHtml(nomeRemetente)}
-        </div>
-
-        <div style="white-space:pre-wrap">
-          ${escapeHtml(texto)}
-        </div>
-
-        <div style="
-          font-size:10px;
-          color:#6b7280;
-          margin-top:6px
-        ">
-          ${escapeHtml(formatarDataMensagem(m.created_at))}
-        </div>
-      `;
-
-      item.appendChild(balao);
-      return item;
-    }
+    const chave = m => String(
+      m.id ?? m.uuid ??
+      [m.created_at, m.sender?.name, m.text, m.from_me]
+        .join('|')
+    );
 
     async function carregarMensagens() {
       if (
         estado.carregando ||
         !estado.mais ||
         !area.isConnected
-      ) {
-        return;
-      }
+      ) return;
 
       estado.carregando = true;
 
-      let aviso = area.querySelector('.historico-aviso-carga');
+      let aviso = area.querySelector(
+        '.historico-aviso-carga'
+      );
 
       if (!aviso) {
-        aviso = criarElemento(
+        aviso = criar(
           'div',
           'historico-aviso historico-aviso-carga'
         );
@@ -618,17 +630,14 @@ const req = (url) => new Promise((resolve, reject) => {
       aviso.textContent = '⏳ Carregando mensagens...';
 
       try {
-        const cursorSolicitado = estado.cursor;
-
+        const cursorAtual = estado.cursor;
         const resultado = await buscarMensagens(
-          atendimento.id,
-          cursorSolicitado
+          atendimento.id, cursorAtual
         );
 
         if (!area.isConnected) return;
 
-        const lista = resultado.lista;
-        const assinatura = lista.map(chaveMensagem).join('||');
+        const assinatura = resultado.lista.map(chave).join('||');
 
         if (
           assinatura &&
@@ -636,84 +645,67 @@ const req = (url) => new Promise((resolve, reject) => {
         ) {
           estado.mais = false;
           aviso.textContent =
-            'O servidor repetiu o mesmo lote de mensagens.';
+            'O servidor repetiu o mesmo lote.';
           return;
         }
 
         estado.assinaturaAnterior = assinatura;
 
-        const elementos = [];
-
-        for (const m of lista) {
-          const chave = chaveMensagem(m);
-
-          if (estado.ids.has(chave)) continue;
-
-          estado.ids.add(chave);
-          elementos.push(m);
-        }
-
-        elementos.sort((a, b) => {
-          const dataA = new Date(a.created_at || 0).getTime() || 0;
-          const dataB = new Date(b.created_at || 0).getTime() || 0;
-          return dataA - dataB;
+        const novas = resultado.lista.filter(m => {
+          const id = chave(m);
+          if (estado.ids.has(id)) return false;
+          estado.ids.add(id);
+          return true;
         });
+
+        novas.sort((a, b) =>
+          (new Date(a.created_at || 0).getTime() || 0) -
+          (new Date(b.created_at || 0).getTime() || 0)
+        );
 
         const alturaAnterior = area.scrollHeight;
         const scrollAnterior = area.scrollTop;
 
         const fragmento = document.createDocumentFragment();
 
-        for (const m of elementos) {
-          fragmento.appendChild(criarMensagem(m));
+        for (const m of novas) {
+          fragmento.appendChild(
+            criarMensagem(m, nomeContato)
+          );
         }
 
-        // Mensagens antigas entram acima das mensagens recentes.
         area.insertBefore(fragmento, aviso.nextSibling);
-
-        const proximoCursor = resultado.paginacao.cursor;
 
         if (estado.primeiraCarga) {
           estado.primeiraCarga = false;
           area.scrollTop = area.scrollHeight;
         } else {
-          area.scrollTop =
-            scrollAnterior + area.scrollHeight - alturaAnterior;
+          area.scrollTop = scrollAnterior +
+            area.scrollHeight - alturaAnterior;
         }
+
+        const proximo = resultado.paginacao.cursor;
 
         estado.mais =
           Boolean(resultado.paginacao.mais) &&
-          Boolean(proximoCursor) &&
-          !estado.cursoresUsados.has(proximoCursor) &&
-          elementos.length > 0;
+          Boolean(proximo) &&
+          !estado.cursoresUsados.has(proximo) &&
+          novas.length > 0;
 
-        if (cursorSolicitado) {
-          estado.cursoresUsados.add(cursorSolicitado);
+        if (cursorAtual) {
+          estado.cursoresUsados.add(cursorAtual);
         }
 
-        estado.cursor = proximoCursor;
+        estado.cursor = proximo;
 
-        if (estado.mais) {
-          aviso.textContent =
-            '↑ Role para cima para carregar mensagens anteriores';
-        } else if (resultado.paginacao.estimado) {
-          aviso.textContent =
-            'Não foi possível confirmar mais mensagens.';
-        } else {
-          aviso.textContent =
-            '✓ Fim das mensagens disponíveis';
-        }
+        aviso.textContent = estado.mais
+          ? '↑ Role para cima para carregar mensagens anteriores'
+          : '✓ Fim das mensagens disponíveis';
 
       } catch (erro) {
-        console.error(
-          '[Komunic Histórico] Erro nas mensagens:',
-          erro
-        );
-
+        console.error('[Komunic Histórico]', erro);
         aviso.textContent =
-          `❌ Falha ao carregar: ${erro.message}. ` +
-          'Role novamente para tentar.';
-
+          `❌ Falha: ${erro.message}. Role novamente para tentar.`;
       } finally {
         estado.carregando = false;
       }
@@ -741,9 +733,7 @@ const req = (url) => new Promise((resolve, reject) => {
         estado.inicializado &&
         estado.mais &&
         !estado.carregando
-      ) {
-        carregarMensagens();
-      }
+      ) carregarMensagens();
     }, { passive: true });
 
     return card;
@@ -751,45 +741,38 @@ const req = (url) => new Promise((resolve, reject) => {
 
   function mostrarModal(nomeContato, contatoId) {
     fecharModal();
+    sessaoMidias = gerenciadorMidias();
 
-    const modal = criarElemento('div');
+    const modal = criar('div');
     modal.id = 'modal-historico';
 
-    const content = criarElemento('div', 'historico-content');
-    const header = criarElemento('div', 'historico-header');
+    const content = criar('div', 'historico-content');
+    const header = criar('div', 'historico-header');
 
-    const titulo = criarElemento(
-      'span',
-      '',
+    const titulo = criar(
+      'span', '',
       `📜 Histórico de Atendimentos — ${nomeContato}`
     );
 
-    const fechar = criarElemento(
-      'button',
-      'historico-fechar',
-      '×'
+    const fechar = criar(
+      'button', 'historico-fechar', '×'
     );
-
     fechar.type = 'button';
     fechar.addEventListener('click', fecharModal);
 
     header.append(titulo, fechar);
 
-    const lista = criarElemento('div', 'historico-lista');
-
-    const rodape = criarElemento(
-      'div',
-      'historico-aviso',
-      'Preparando histórico...'
+    const lista = criar('div', 'historico-lista');
+    const rodape = criar(
+      'div', 'historico-aviso', 'Preparando histórico...'
     );
 
     content.append(header, lista, rodape);
     modal.appendChild(content);
     document.body.appendChild(modal);
-
     modalAtual = modal;
 
-    modal.addEventListener('click', (e) => {
+    modal.addEventListener('click', e => {
       if (e.target === modal) fecharModal();
     });
 
@@ -808,26 +791,21 @@ const req = (url) => new Promise((resolve, reject) => {
         estado.carregando ||
         !estado.mais ||
         !modal.isConnected
-      ) {
-        return;
-      }
+      ) return;
 
       estado.carregando = true;
       rodape.textContent = '⏳ Carregando atendimentos...';
 
       try {
         const resultado = await buscarAtendimentos(
-          contatoId,
-          estado.pagina
+          contatoId, estado.pagina
         );
 
         if (!modal.isConnected) return;
 
         const atendimentos = resultado.lista;
-
         const assinatura = atendimentos
-          .map((a) => String(a.id))
-          .join('|');
+          .map(a => String(a.id)).join('|');
 
         if (
           assinatura &&
@@ -835,8 +813,7 @@ const req = (url) => new Promise((resolve, reject) => {
         ) {
           estado.mais = false;
           rodape.textContent =
-            'O servidor repetiu a página anterior. ' +
-            'Paginação interrompida para evitar duplicações.';
+            'O servidor repetiu a página anterior.';
           return;
         }
 
@@ -851,21 +828,20 @@ const req = (url) => new Promise((resolve, reject) => {
 
         let novos = 0;
 
-        for (const a of atendimentos) {
-          const id = String(a.id);
-
+        for (const atendimento of atendimentos) {
+          const id = String(atendimento.id);
           if (estado.ids.has(id)) continue;
 
           estado.ids.add(id);
-          lista.appendChild(criarCard(a, nomeContato));
-
+          lista.appendChild(
+            criarCard(atendimento, nomeContato)
+          );
           novos++;
           estado.total++;
         }
 
         estado.semNovos = novos === 0
-          ? estado.semNovos + 1
-          : 0;
+          ? estado.semNovos + 1 : 0;
 
         estado.mais =
           Boolean(resultado.paginacao.mais) &&
@@ -873,17 +849,9 @@ const req = (url) => new Promise((resolve, reject) => {
 
         estado.pagina++;
 
-        if (estado.mais) {
-          rodape.textContent =
-            `${estado.total} atendimento(s) carregado(s). ` +
-            '↓ Role para carregar mais.';
-        } else {
-          rodape.textContent =
-            `${estado.total} atendimento(s) carregado(s). ` +
-            (resultado.paginacao.estimado
-              ? 'Fim dos lotes disponíveis ou paginação não confirmada.'
-              : '✓ Fim do histórico disponível.');
-        }
+        rodape.textContent = estado.mais
+          ? `${estado.total} atendimento(s). ↓ Role para carregar mais.`
+          : `${estado.total} atendimento(s). ✓ Fim do histórico.`;
 
         if (estado.total === 0) {
           rodape.textContent =
@@ -891,33 +859,25 @@ const req = (url) => new Promise((resolve, reject) => {
         }
 
       } catch (erro) {
-        console.error(
-          '[Komunic Histórico] Erro nos atendimentos:',
-          erro
-        );
-
+        console.error('[Komunic Histórico]', erro);
         rodape.textContent =
-          `❌ Erro: ${erro.message}. ` +
-          'Role novamente para tentar.';
-
+          `❌ Erro: ${erro.message}. Role novamente para tentar.`;
       } finally {
         estado.carregando = false;
       }
     }
 
     lista.addEventListener('scroll', () => {
-      const distanciaDoFim =
+      const distancia =
         lista.scrollHeight -
         lista.scrollTop -
         lista.clientHeight;
 
       if (
-        distanciaDoFim < 160 &&
+        distancia < 160 &&
         estado.mais &&
         !estado.carregando
-      ) {
-        carregarAtendimentos();
-      }
+      ) carregarAtendimentos();
     }, { passive: true });
 
     carregarAtendimentos();
@@ -928,7 +888,7 @@ const req = (url) => new Promise((resolve, reject) => {
   async function exibirHistorico() {
     if (abrindo) return;
 
-    const nome = getNomeContato();
+    const nome = nomeContatoAtual();
 
     if (!nome) {
       alert('Não foi possível identificar o contato.');
@@ -940,20 +900,13 @@ const req = (url) => new Promise((resolve, reject) => {
     try {
       const contatos = await buscarContato(nome);
 
-      if (!contatos.length) {
-        alert(`Nenhum contato encontrado: "${nome}".`);
-        return;
-      }
-
       const exato = contatos.find(
-        (c) => normalizarNome(c.name) === normalizarNome(nome)
+        c => normalizar(c.name) === normalizar(nome)
       );
 
       if (!exato) {
         alert(
-          `Não foi possível confirmar o contato "${nome}" ` +
-          'nos resultados da pesquisa. ' +
-          'Nenhum histórico de outro contato será aberto.'
+          `Não foi possível confirmar o contato "${nome}" na pesquisa.`
         );
         return;
       }
@@ -962,10 +915,7 @@ const req = (url) => new Promise((resolve, reject) => {
 
     } catch (erro) {
       console.error('[Komunic Histórico]', erro);
-      alert(
-        `Erro ao carregar histórico: ${erro.message}`
-      );
-
+      alert(`Erro ao carregar histórico: ${erro.message}`);
     } finally {
       abrindo = false;
     }
@@ -977,11 +927,9 @@ const req = (url) => new Promise((resolve, reject) => {
 
     const container = document.querySelector('.flex.mr-2');
     if (!container) return;
-
     if (document.querySelector('#btn-historico-chat')) return;
 
-    const botao = criarElemento('button');
-
+    const botao = criar('button');
     botao.id = 'btn-historico-chat';
     botao.type = 'button';
 
@@ -989,26 +937,21 @@ const req = (url) => new Promise((resolve, reject) => {
       'rounded-full flex items-center justify-center ' +
       'w-10 h-10 hover:bg-gray-100 border border-gray-300';
 
-    botao.style.borderColor = '#e5e7eb';
     botao.style.cursor = 'pointer';
+    botao.title = 'Histórico do contato';
 
     botao.innerHTML = `
       <svg xmlns="http://www.w3.org/2000/svg"
-        fill="none"
-        viewBox="0 0 24 24"
-        stroke-width="1.5"
-        stroke="currentColor"
-        class="h-6 w-6"
-        style="color:${COR_PRINCIPAL}">
+        fill="none" viewBox="0 0 24 24"
+        stroke-width="1.5" stroke="currentColor"
+        class="h-6 w-6" style="color:${COR}">
         <path stroke-linecap="round"
           stroke-linejoin="round"
           d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/>
       </svg>
     `;
 
-    botao.title = 'Histórico do contato';
     botao.addEventListener('click', exibirHistorico);
-
     container.insertBefore(botao, container.firstChild);
   }
 
@@ -1017,7 +960,6 @@ const req = (url) => new Promise((resolve, reject) => {
 
   function verificarBotao() {
     if (verificacaoPendente) return;
-
     verificacaoPendente = true;
 
     requestAnimationFrame(() => {
@@ -1032,10 +974,10 @@ const req = (url) => new Promise((resolve, reject) => {
     });
   }
 
-  new MutationObserver(verificarBotao).observe(document.body, {
-    subtree: true,
-    childList: true
-  });
+  new MutationObserver(verificarBotao).observe(
+    document.body,
+    { subtree: true, childList: true }
+  );
 
   adicionarBotao();
 
