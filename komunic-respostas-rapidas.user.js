@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Komunic - Painel de Respostas Rápidas (Persistente + Visual Aprimorado)
 // @namespace    http://tampermonkey.net/
-// @version      6.1
+// @version      6.3
 // @description  Painel fixo à direita com pastas, respostas dinâmicas ({nome}, {saudacao}), não some ao trocar de abas, visual moderno, com exportação/importação.
 // @author       Gabriel Dal Prá
 // @match        https://app.komunic.net/newchat*
