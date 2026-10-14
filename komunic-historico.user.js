@@ -2,7 +2,7 @@
  // ==UserScript==
  // @name         Komunic - Histórico do Contato (Rolagem Infinita)
  // @namespace    http://tampermonkey.net/
- // @version      3.4
+ // @version      3.5
  // @description  Histórico de atendimentos e mensagens com paginação por cursor
  // @author       Gabriel
  // @match        https://app.komunic.net/*
@@ -58,62 +58,79 @@
     }
   };
 
-  const req = (url) => new Promise((resolve, reject) => {
-    const isPesquisa = /\/live-history\/contact\?/.test(url);
+  
+const req = (url) => new Promise((resolve, reject) => {
+  const isPesquisa =
+    /\/live-history\/contact\?/.test(url);
 
-    const headers = {
-      accept: isPesquisa
-        ? 'text/html, application/xhtml+xml'
-        : 'application/json, text/plain, */*',
-      'x-requested-with': 'XMLHttpRequest'
-    };
+  const headers = {
+    accept: isPesquisa
+      ? 'text/html, application/xhtml+xml'
+      : 'application/json, text/plain, */*',
+    'x-requested-with': 'XMLHttpRequest'
+  };
 
-    const token = csrf();
-    if (token) headers['x-xsrf-token'] = token;
+  const token = csrf();
 
-    if (isPesquisa) {
-      headers['x-inertia'] = 'true';
+  if (token) {
+    headers['x-xsrf-token'] = token;
+  }
 
-      const versao = inertiaVersion();
-      if (versao) headers['x-inertia-version'] = versao;
+  if (isPesquisa) {
+    headers['x-inertia'] = 'true';
+    headers['x-inertia-partial-component'] =
+      'Tenant/LiveCallHistoryContact';
+    headers['x-inertia-partial-data'] = 'contacts';
 
-      headers['x-inertia-partial-component'] =
-        'Tenant/LiveCallHistoryContact';
-      headers['x-inertia-partial-data'] = 'contacts';
-    }
+    // Não envia versão potencialmente incompatível.
+    // O servidor pode responder com os dados da página.
+  }
 
-    GM_xmlhttpRequest({
-      method: 'GET',
-      url,
-      headers,
-      responseType: 'json',
-      timeout: 20000,
-      onload: (response) => {
-        if (response.status < 200 || response.status >= 300) {
-          reject(new Error(`HTTP ${response.status}`));
-          return;
+  GM_xmlhttpRequest({
+    method: 'GET',
+    url,
+    headers,
+    responseType: 'json',
+    timeout: 20000,
+
+    onload: (response) => {
+      if (response.status === 409) {
+        reject(new Error(
+          'HTTP 409: conflito de versão ou contexto Inertia'
+        ));
+        return;
+      }
+
+      if (response.status < 200 || response.status >= 300) {
+        reject(new Error(`HTTP ${response.status}`));
+        return;
+      }
+
+      try {
+        let data = response.response;
+
+        if (typeof data === 'string') {
+          data = JSON.parse(data);
         }
 
-        try {
-          let data = response.response;
-
-          if (typeof data === 'string') {
-            data = JSON.parse(data);
-          }
-
-          if (data == null) {
-            data = JSON.parse(response.responseText);
-          }
-
-          resolve(data);
-        } catch {
-          reject(new Error('Resposta JSON inválida'));
+        if (data == null) {
+          data = JSON.parse(response.responseText);
         }
-      },
-      ontimeout: () => reject(new Error('Tempo limite excedido')),
-      onerror: () => reject(new Error('Erro de conexão'))
-    });
+
+        resolve(data);
+      } catch {
+        reject(new Error('Resposta JSON inválida'));
+      }
+    },
+
+    ontimeout: () =>
+      reject(new Error('Tempo limite excedido')),
+
+    onerror: () =>
+      reject(new Error('Erro de conexão'))
   });
+});
+
 
   function extrairLista(data, tipo) {
     if (Array.isArray(data)) return data;
