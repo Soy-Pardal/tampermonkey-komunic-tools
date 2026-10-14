@@ -2,7 +2,7 @@
  // ==UserScript==
  // @name         Komunic - Histórico do Contato (Rolagem Infinita)
  // @namespace    http://tampermonkey.net/
- // @version      3.5
+ // @version      3.6
  // @description  Histórico de atendimentos e mensagens com paginação por cursor
  // @author       Gabriel
  // @match        https://app.komunic.net/*
@@ -48,15 +48,24 @@
     }
   };
 
-  const inertiaVersion = () => {
-    try {
-      return JSON.parse(
-        document.querySelector('#app')?.getAttribute('data-page') || '{}'
-      ).version || '';
-    } catch {
-      return '';
-    }
-  };
+
+ const inertiaVersion = () => {
+   try {
+     const elemento = document.querySelector(
+       'script[data-page="app"][type="application/json"]'
+     );
+ 
+     if (!elemento) return '';
+ 
+     const dados = JSON.parse(elemento.textContent);
+     return dados.version || '';
+ 
+   } catch (erro) {
+     console.error('[Komunic] Erro ao obter versão Inertia:', erro);
+     return '';
+   }
+ };
+
 
   
 const req = (url) => new Promise((resolve, reject) => {
