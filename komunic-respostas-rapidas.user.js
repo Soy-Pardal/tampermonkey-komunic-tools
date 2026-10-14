@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Komunic - Painel de Respostas Rápidas (Persistente + Visual Aprimorado)
 // @namespace    http://tampermonkey.net/
-// @version      6.4
+// @version      6.5
 // @description  Painel fixo à direita com pastas, respostas dinâmicas ({nome}, {saudacao}), não some ao trocar de abas, visual moderno, com exportação/importação.
 // @author       Gabriel Dal Prá
 // @match        https://app.komunic.net/newchat*
@@ -98,19 +98,20 @@
     }
 
     // ========== FUNÇÕES DO CHAT ==========
+
     function getPrimeiroNomeContato() {
-        const headerName = document.querySelector('.chat-top-area .font-bold.cursor-pointer, .chat-top-area p.font-bold, .messages-col .font-bold.cursor-pointer');
+        const headerName = document.querySelector(
+            '[data-testid="chat-top-contact-name"]'
+        );
+    
         if (headerName) {
-            let nomeCompleto = headerName.innerText.trim();
+            const nomeCompleto = headerName.textContent.trim();
             return nomeCompleto.split(/[\s\-–—]/)[0] || 'cliente';
         }
-        const activeChat = document.querySelector('.cursor-pointer.bg-gray-50, .cursor-pointer.bg-gray-100');
-        if (activeChat) {
-            let nomeChat = activeChat.querySelector('.font-bold')?.innerText.trim();
-            if (nomeChat) return nomeChat.split(/[\s\-–—]/)[0];
-        }
+    
         return 'cliente';
     }
+
 
     function getSaudacaoPorHorario() {
         const hora = new Date().getHours();
