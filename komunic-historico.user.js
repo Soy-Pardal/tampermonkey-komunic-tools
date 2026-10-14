@@ -2,7 +2,7 @@
  // ==UserScript==
  // @name         Komunic - Histórico do Contato (Rolagem Infinita)
  // @namespace    http://tampermonkey.net/
- // @version      3.6
+ // @version      3.7
  // @description  Histórico de atendimentos e mensagens com paginação por cursor
  // @author       Gabriel
  // @match        https://app.komunic.net/*
@@ -85,15 +85,13 @@ const req = (url) => new Promise((resolve, reject) => {
     headers['x-xsrf-token'] = token;
   }
 
-  if (isPesquisa) {
-    headers['x-inertia'] = 'true';
-    headers['x-inertia-partial-component'] =
-      'Tenant/LiveCallHistoryContact';
-    headers['x-inertia-partial-data'] = 'contacts';
-
-    // Não envia versão potencialmente incompatível.
-    // O servidor pode responder com os dados da página.
-  }
+ if (isPesquisa) {
+   headers['x-inertia'] = 'true';
+   headers['x-inertia-version'] = inertiaVersion();
+   headers['x-inertia-partial-component'] =
+     'Tenant/LiveCallHistoryContact';
+   headers['x-inertia-partial-data'] = 'contacts';
+ }
 
   GM_xmlhttpRequest({
     method: 'GET',
