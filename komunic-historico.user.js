@@ -13,7 +13,7 @@
 
 (function() {
     'use strict';
-    const COR_PRINCIPAL = 'rgb(251 146 60 / 1)';
+    const COR_PRINCIPAL = 'rgb(31 221 9 / 1)';
 
     // Utilitários (mantidos iguais)
     const getNomeContato = () => {
@@ -102,7 +102,7 @@
     atendimentos.sort((a,b)=>new Date(b.date_start)-new Date(a.date_start));
     let html = '<div style="display:flex;flex-direction:column;gap:12px;">';
     for(const a of atendimentos) {
-        const statusColor = a.status==='closed'?'#10b981':(a.status==='open'?'#f59e0b':'#6b7280');
+        const statusColor = a.status==='closed'?'#10b981':(a.status==='open'?'#1fdd09':'#6b7280');
         html += `
             <div style="border:1px solid #e5e7eb;border-radius:12px;background:#fafafa;overflow:hidden;">
                 <div style="background:#f3f4f6;padding:10px 12px;border-bottom:1px solid #e5e7eb;">
