@@ -2,12 +2,15 @@
  // ==UserScript==
  // @name         Acessorias - Contatos em Lote
  // @namespace    gnp-acessorias-contatos
- // @version      3.0
- // @description  Gerencia e adiciona varios contatos na empresa
+ // @version      3.1.0
+ // @description  Gerenciamento de contatos com atualizacao automatica
  // @match        https://app.acessorias.com/sysmain.php*
  // @run-at       document-idle
+ // @updateURL    https://raw.githubusercontent.com/Soy-Pardal/tampermonkey-komunic-tools/main/acessorias-contato-em-lote.js
+ // @downloadURL  https://raw.githubusercontent.com/Soy-Pardal/tampermonkey-komunic-tools/main/acessorias-contato-em-lote.js
  // @grant        none
  // ==/UserScript==
+
 
  (() => {
    'use strict';
