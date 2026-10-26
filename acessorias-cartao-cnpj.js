@@ -1,14 +1,17 @@
 
  // ==UserScript==
- // @name         Acessorias - Importar CNPJ Seguro
- // @namespace    gnp-cnpj-seguro
- // @version      3.0
- // @description  Importacao local de PDF sem acionar rotinas do sistema
+ // @name         Acessorias - Importar Cartao CNPJ
+ // @namespace    gnp-acessorias-cnpj
+ // @version      3.1.0
+ // @description  Importador de Cartao CNPJ com atualizacao automatica
  // @match        https://app.acessorias.com/sysmain.php*
  // @run-at       document-idle
- // @grant        none
  // @require      https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js
+ // @updateURL    https://raw.githubusercontent.com/Soy-Pardal/tampermonkey-komunic-tools/main/acessorias-cartao-cnpj.js
+ // @downloadURL  https://raw.githubusercontent.com/Soy-Pardal/tampermonkey-komunic-tools/main/acessorias-cartao-cnpj.js
+ // @grant        none
  // ==/UserScript==
+
 
  (function () {
    'use strict';
