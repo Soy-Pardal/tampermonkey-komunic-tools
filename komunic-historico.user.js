@@ -2,7 +2,7 @@
  // ==UserScript==
  // @name         Komunic - Histórico do Contato (Rolagem Infinita + Mídias)
  // @namespace    http://tampermonkey.net/
- // @version      3.8
+ // @version      3.9
  // @description  Histórico de atendimentos com mensagens, mídias e rolagem infinita
  // @author       Gabriel
  // @match        https://app.komunic.net/*
@@ -200,15 +200,93 @@
     return { mais: quantidade >= limite, estimado: true };
   }
 
-  async function buscarContato(nome) {
-    const termo = nome.split(/[\s\-–—]/)[0].trim();
-    const dados = await requisicao(
-      `${BASE}/live-history/contact?term=${
-        encodeURIComponent(termo)
-      }`
-    );
-    return listaDados(dados, 'contatos');
-  }
+
+ async function buscarContato(nome) {
+   const nomeOriginal = nomeLimpo(nome);
+   const nomeNormalizado = normalizarNome(nomeOriginal);
+ 
+   const partes = nomeOriginal.split(/\s+/).filter(Boolean);
+ 
+   const termos = [...new Set([
+     nomeOriginal,
+     partes[0],
+     partes.length > 1 ? partes[1] : '',
+     partes.length > 2 ? partes.at(-1) : ''
+   ].filter(Boolean))];
+ 
+   const encontrados = new Map();
+   const erros = [];
+ 
+   // 1. Busca pela rota original do histórico.
+   for (const termo of termos) {
+     try {
+       const url =
+         `${BASE}/live-history/contact?term=` +
+         encodeURIComponent(termo);
+ 
+       const resposta = await req(url);
+       const contatos = extrairLista(resposta, 'contatos');
+ 
+       for (const contato of contatos) {
+         if (!contato || contato.id == null) continue;
+ 
+         const nomeEncontrado = String(
+           contato.name || contato.contact?.name || ''
+         );
+ 
+         encontrados.set(String(contato.id), {
+           ...contato,
+           name: nomeEncontrado
+         });
+       }
+ 
+       const existeExato = [...encontrados.values()].some(
+         contato =>
+           normalizarNome(contato.name) === nomeNormalizado
+       );
+ 
+       if (existeExato) break;
+ 
+     } catch (erro) {
+       console.warn(
+         '[Komunic Histórico] Pesquisa falhou:',
+         termo,
+         erro.message
+       );
+       erros.push(erro.message);
+     }
+   }
+ 
+   const lista = [...encontrados.values()];
+ 
+   // 2. Ordena os resultados pela correspondência.
+   const pontuacao = contato => {
+     const atual = normalizarNome(contato.name);
+ 
+     if (atual === nomeNormalizado) return 100;
+     if (atual.startsWith(nomeNormalizado)) return 80;
+     if (nomeNormalizado.startsWith(atual) && atual.length > 3) {
+       return 70;
+     }
+ 
+     const palavras = nomeNormalizado.split(' ');
+     return palavras.filter(p =>
+       p.length > 2 && atual.split(' ').includes(p)
+     ).length * 10;
+   };
+ 
+   lista.sort((a, b) => pontuacao(b) - pontuacao(a));
+ 
+   if (!lista.length && erros.length) {
+     throw new Error(
+       'A pesquisa de contatos não retornou resultados. ' +
+       'Verifique o Console (F12) para detalhes.'
+     );
+   }
+ 
+   return lista;
+ }
+
 
   async function buscarAtendimentos(id, pagina) {
     const dados = await requisicao(
@@ -885,41 +963,73 @@
 
   let abrindo = false;
 
-  async function exibirHistorico() {
-    if (abrindo) return;
 
-    const nome = nomeContatoAtual();
+ async function exibirHistorico() {
+   if (abrindo) return;
+ 
+   const nome = getNomeContato();
+ 
+   if (!nome) {
+     alert('Não foi possível identificar o contato atual.');
+     return;
+   }
+ 
+   abrindo = true;
+ 
+   try {
+     const contatos = await buscarContato(nome);
+ 
+     if (!contatos.length) {
+       alert(
+         `Nenhum contato encontrado para "${nome}".\n\n` +
+         'A pesquisa de atendimentos utiliza contact_query, ' +
+         'mas precisamos identificar o contato correto antes ' +
+         'de abrir o histórico.'
+       );
+       return;
+     }
+ 
+     const nomeAtual = normalizarNome(nome);
+ 
+     const exatos = contatos.filter(
+       contato => normalizarNome(contato.name) === nomeAtual
+     );
+ 
+     let escolhido = null;
+ 
+     if (exatos.length === 1) {
+       escolhido = exatos[0];
+     } else {
+       escolhido = await selecionarContato(
+         nome,
+         exatos.length ? exatos : contatos
+       );
+     }
+ 
+     if (!escolhido) return;
+ 
+     console.log('[Komunic Histórico] Contato escolhido:', {
+       id: escolhido.id,
+       nome: escolhido.name
+     });
+ 
+     mostrarModal(
+       escolhido.name || nome,
+       escolhido.id
+     );
+ 
+   } catch (erro) {
+     console.error('[Komunic Histórico]', erro);
+ 
+     alert(
+       'Não foi possível abrir o histórico.\n\n' +
+       erro.message
+     );
+   } finally {
+     abrindo = false;
+   }
+ }
 
-    if (!nome) {
-      alert('Não foi possível identificar o contato.');
-      return;
-    }
-
-    abrindo = true;
-
-    try {
-      const contatos = await buscarContato(nome);
-
-      const exato = contatos.find(
-        c => normalizar(c.name) === normalizar(nome)
-      );
-
-      if (!exato) {
-        alert(
-          `Não foi possível confirmar o contato "${nome}" na pesquisa.`
-        );
-        return;
-      }
-
-      mostrarModal(exato.name || nome, exato.id);
-
-    } catch (erro) {
-      console.error('[Komunic Histórico]', erro);
-      alert(`Erro ao carregar histórico: ${erro.message}`);
-    } finally {
-      abrindo = false;
-    }
-  }
 
   function adicionarBotao() {
     if (!location.pathname.includes('/newchat')) return;
