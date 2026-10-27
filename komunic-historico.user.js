@@ -1,987 +1,827 @@
 
  // ==UserScript==
- // @name         Komunic - Histórico do Contato (Rolagem Infinita + Mídias)
- // @namespace    http://tampermonkey.net/
- // @version      4.2
- // @description  Histórico do contato com atendimentos, mensagens, anexos e rolagem infinita
- // @author       Gabriel
+ // @name         Komunic - Histórico do Contato (Atendimentos + Mídias)
+ // @namespace    https://github.com/Soy-Pardal/tampermonkey-komunic-tools
+ // @version      4.3
+ // @description  Consulta o histórico pela Gestão de Atendimentos, com mensagens e anexos
  // @match        https://app.komunic.net/*
- // @grant        GM_xmlhttpRequest
- // @connect      app.komunic.net
+ // @grant        none
  // @run-at       document-idle
  // ==/UserScript==
 
 (function () {
   'use strict';
 
-  const BASE = 'https://app.komunic.net';
-  const COR = '#1fdd09';
+  const BASE = location.origin;
   const LIMITE = 10;
+  const MAX_PAGINAS = 30;
 
-  const criar = (tag, classe = '', texto = '') => {
+  let modal = null;
+  let abrindo = false;
+  let ultimaUrl = location.href;
+  let observadorBotao = null;
+
+  const $ = (seletor, raiz = document) =>
+    raiz.querySelector(seletor);
+
+  function elemento(tag, classe = '', texto = '') {
     const el = document.createElement(tag);
-    el.className = classe;
-    el.textContent = texto;
+    if (classe) el.className = classe;
+    if (texto) el.textContent = texto;
     return el;
-  };
+  }
 
-  const escapeHtml = valor =>
-    String(valor ?? '').replace(/[&<>"']/g, c => ({
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;'
-    }[c]));
-
-  function normalizarBusca(valor) {
+  function normalizar(valor) {
     return String(valor || '')
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .toLocaleLowerCase('pt-BR')
-      .replace(/[^a-z0-9 ]/g, ' ')
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function limparPesquisa(valor) {
+    return String(valor || '')
+      .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
       .replace(/\s+/g, ' ')
       .trim();
   }
 
   function nomeContatoAtual() {
-    return document.querySelector(
+    return $(
       '[data-testid="chat-top-contact-name"]'
     )?.textContent?.trim() || '';
   }
 
-  function csrf() {
-    const token = document.cookie.match(
-      /(?:^|;\s*)XSRF-TOKEN=([^;]+)/
-    );
+  function tokenXsrf() {
+    const parte = document.cookie
+      .split('; ')
+      .find(c => c.startsWith('XSRF-TOKEN='));
 
-    if (!token) return '';
+    if (!parte) return '';
 
     try {
-      return decodeURIComponent(token[1]);
-    } catch {
-      return token[1];
-    }
-  }
-
-  function versaoInertia() {
-    try {
-      const script = document.querySelector(
-        'script[data-page="app"][type="application/json"]'
+      return decodeURIComponent(
+        parte.substring('XSRF-TOKEN='.length)
       );
-
-      return script
-        ? JSON.parse(script.textContent).version || ''
-        : '';
     } catch {
       return '';
     }
   }
 
-  function requisicao(url) {
-    return new Promise((resolve, reject) => {
-      const pesquisa = /\/live-history\/contact\?/.test(url);
 
-      const headers = {
-        accept: pesquisa
-          ? 'text/html, application/xhtml+xml, application/json'
-          : 'application/json, text/plain, */*',
-        'x-requested-with': 'XMLHttpRequest'
-      };
+function versaoInertia() {
+  try {
+    const pagina = document.querySelector(
+      'script[data-page="app"]'
+    );
 
-      const token = csrf();
+    if (!pagina) return '';
 
-      if (token) {
-        headers['x-xsrf-token'] = token;
+    const dados = JSON.parse(pagina.textContent || '{}');
+
+    return dados.version || '';
+  } catch (erro) {
+    console.warn(
+      '[Komunic Histórico] Não foi possível ler a versão Inertia:',
+      erro
+    );
+    return '';
+  }
+}
+
+
+  async function requisicao(url, inertia = false) {
+    const headers = {
+      Accept: inertia
+        ? 'text/html, application/xhtml+xml'
+        : 'application/json, text/plain, */*',
+      'X-Requested-With': 'XMLHttpRequest'
+    };
+
+    const token = tokenXsrf();
+    if (token) headers['X-XSRF-TOKEN'] = token;
+
+    if (inertia) {
+      headers['X-Inertia'] = 'true';
+
+      const versao = versaoInertia();
+      if (versao) {
+        headers['X-Inertia-Version'] = versao;
       }
+    }
 
-      if (pesquisa) {
-        headers['x-inertia'] = 'true';
+    const resposta = await fetch(url, {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers
+    });
 
-        const versao = versaoInertia();
-        if (versao) {
-          headers['x-inertia-version'] = versao;
-        }
+    if (resposta.status === 409) {
+      throw new Error(
+        'O Komunic solicitou atualização da página (409). ' +
+        'Atualize o Komunic e tente novamente.'
+      );
+    }
 
-        headers['x-inertia-partial-component'] =
-          'Tenant/LiveCallHistoryContact';
+    if (
+      resposta.status === 401 ||
+      resposta.status === 403
+    ) {
+      throw new Error(
+        'Sessão expirada ou acesso não permitido (' +
+        resposta.status + ').'
+      );
+    }
 
-        headers['x-inertia-partial-data'] = 'contacts';
-      }
+    if (!resposta.ok) {
+      throw new Error(
+        'Erro HTTP ' + resposta.status
+      );
+    }
 
-      GM_xmlhttpRequest({
-        method: 'GET',
-        url,
-        headers,
-        responseType: 'text',
-        timeout: 20000,
+    const tipo = resposta.headers.get('content-type') || '';
 
-        onload: resposta => {
-          if (resposta.status === 409) {
-            reject(new Error(
-              'O Komunic solicitou atualização da sessão (HTTP 409). ' +
-              'Atualize a página e tente novamente.'
-            ));
-            return;
-          }
+    if (!tipo.includes('json')) {
+      throw new Error(
+        'O Komunic não retornou JSON. ' +
+        'Verifique se você continua conectado.'
+      );
+    }
 
-          if (resposta.status === 401 ||
-              resposta.status === 403) {
-            reject(new Error(
-              'Acesso não autorizado (HTTP ' +
-              resposta.status + '). Verifique sua sessão.'
-            ));
-            return;
-          }
+    return resposta.json();
+  }
 
-          if (resposta.status < 200 ||
-              resposta.status >= 300) {
-            reject(new Error(
-              'Falha na consulta: HTTP ' + resposta.status
-            ));
-            return;
-          }
-
-          try {
-            const texto = resposta.responseText ||
-              resposta.response || '';
-
-            const dados = JSON.parse(texto);
-            resolve(dados);
-          } catch {
-            reject(new Error(
-              'O servidor não retornou JSON válido. ' +
-              'A sessão pode ter expirado ou a rota mudou.'
-            ));
-          }
-        },
-
-        onerror: () => reject(
-          new Error('Erro de conexão com o Komunic.')
-        ),
-
-        ontimeout: () => reject(
-          new Error('Tempo excedido na consulta.')
-        )
-      });
+  function parametrosPesquisa(termo, pagina) {
+    return new URLSearchParams({
+      protocol: '',
+      organization_query: '',
+      attendant_query: '',
+      subject_call: '',
+      contact_query: termo,
+      department_id: '',
+      connection_id: '',
+      date_start: '',
+      date_end: '',
+      metric: '',
+      month: '',
+      per_page: '100',
+      page: String(pagina)
     });
   }
 
-  function listaDados(data, tipo) {
-    if (Array.isArray(data)) return data;
+  function blocoAtendimentos(resposta) {
+    const props = resposta?.props || {};
 
-    let candidatos;
+    const possibilidades = [
+      props.attendances,
+      props.customerServices,
+      props.customer_services,
+      props.data,
+      resposta?.attendances,
+      resposta?.data
+    ];
 
-    if (tipo === 'contatos') {
-      candidatos = [
-        data?.props?.contacts?.data,
-        data?.props?.contacts,
-        data?.contacts?.data,
-        data?.contacts,
-        data?.data?.contacts?.data,
-        data?.data?.contacts,
-        data?.data?.data,
-        data?.data
-      ];
-    } else if (tipo === 'atendimentos') {
-      candidatos = [
-        data?.props?.sessions?.data,
-        data?.props?.histories?.data,
-        data?.props?.attendances?.data,
-        data?.sessions?.data,
-        data?.histories?.data,
-        data?.attendances?.data,
-        data?.sessions,
-        data?.histories,
-        data?.attendances,
-        data?.data?.data,
-        data?.data
-      ];
-    } else {
-      candidatos = [
-        data?.messages?.data,
-        data?.messages,
-        data?.data?.messages?.data,
-        data?.data?.messages,
-        data?.data?.data,
-        data?.data
-      ];
+    for (const bloco of possibilidades) {
+      if (Array.isArray(bloco)) {
+        return {
+          data: bloco,
+          next_page_url: null,
+          current_page: 1,
+          last_page: 1
+        };
+      }
+
+      if (bloco && Array.isArray(bloco.data)) {
+        return bloco;
+      }
     }
 
-    return candidatos.find(Array.isArray) || [];
+    throw new Error(
+      'Não foi possível identificar a lista de atendimentos ' +
+      'na resposta do Komunic.'
+    );
   }
 
-  function paginacao(data, tipo, quantidade, limite) {
-    const candidatos = tipo === 'atendimentos'
-      ? [
-          data?.props?.sessions,
-          data?.props?.histories,
-          data?.props?.attendances,
-          data?.sessions,
-          data?.histories,
-          data?.attendances,
-          data?.data,
-          data
-        ]
-      : [
-          data?.pagination,
-          data?.messages,
-          data?.data?.messages,
-          data?.data,
-          data
-        ];
+  function nomeDoAtendimento(a) {
+    return String(
+      a.contact?.name ||
+      a.chat?.name ||
+      a.contact_name ||
+      a.name ||
+      ''
+    );
+  }
 
-    const meta = candidatos.find(v =>
-      v &&
-      typeof v === 'object' &&
-      !Array.isArray(v) &&
-      (
-        v.current_page !== undefined ||
-        v.last_page !== undefined ||
-        v.next_page_url !== undefined ||
-        v.has_more !== undefined ||
-        v.next_cursor !== undefined
-      )
+  function idDoAtendimento(a) {
+    return a.id ?? a.customer_service_id ?? null;
+  }
+
+  function pontuacaoNome(a, nome) {
+    const atual = normalizar(nomeDoAtendimento(a));
+    const procurado = normalizar(nome);
+
+    if (!atual || !procurado) return 0;
+    if (atual === procurado) return 100;
+    if (atual.startsWith(procurado)) return 85;
+    if (procurado.startsWith(atual)) return 70;
+
+    const palavras = procurado
+      .split(' ')
+      .filter(p => p.length > 2);
+
+    const encontradas = palavras.filter(
+      p => atual.split(' ').includes(p)
     );
 
-    if (tipo === 'mensagens') {
-      return {
-        mais: meta?.has_more === true &&
-          Boolean(meta?.next_cursor),
-        cursor: meta?.next_cursor || null
-      };
-    }
-
-    if (meta?.next_page_url !== undefined) {
-      return { mais: Boolean(meta.next_page_url) };
-    }
-
-    if (meta?.has_more !== undefined) {
-      return { mais: Boolean(meta.has_more) };
-    }
-
-    if (
-      meta?.current_page !== undefined &&
-      meta?.last_page !== undefined
-    ) {
-      return {
-        mais: Number(meta.current_page) <
-          Number(meta.last_page)
-      };
-    }
-
-    return { mais: quantidade >= limite };
+    return palavras.length
+      ? Math.round(
+          60 * encontradas.length / palavras.length
+        )
+      : 0;
   }
 
-  async function selecionarContato(nome, contatos) {
-    const opcoes = contatos.slice(0, 25);
+  async function buscarAtendimentosPorNome(nome) {
+    const nomeLimpo = limparPesquisa(nome);
 
-    const mensagem =
-      'Selecione o contato correto para "' + nome + '":\n\n' +
-      opcoes.map((c, i) =>
-        `${i + 1}. ${c.name || '(sem nome)'} (ID ${c.id})`
-      ).join('\n') +
-      '\n\nDigite o número correspondente ou cancele:';
-
-    const entrada = window.prompt(mensagem, '1');
-
-    if (entrada === null) return null;
-
-    const indice = Number(entrada) - 1;
-
-    if (
-      !Number.isInteger(indice) ||
-      indice < 0 ||
-      indice >= opcoes.length
-    ) {
-      alert('Seleção inválida.');
-      return null;
+    if (!nomeLimpo) {
+      throw new Error('Nome do contato vazio.');
     }
 
-    return opcoes[indice];
-  }
-
-  async function buscarContato(nome) {
-    const nomeOriginal = String(nome || '').trim();
-    const nomeNormalizado = normalizarBusca(nomeOriginal);
-
-    const partes = nomeOriginal.split(/\s+/).filter(Boolean);
+    const partes = nomeLimpo.split(' ');
 
     const termos = [...new Set([
-      nomeOriginal,
-      partes[0],
-      partes.length > 1 ? partes[1] : '',
-      partes.length > 2 ? partes.at(-1) : ''
+      nomeLimpo,
+      partes.slice(0, 2).join(' '),
+      partes[0]
     ].filter(Boolean))];
 
     const encontrados = new Map();
-    const erros = [];
 
     for (const termo of termos) {
-      try {
-        const url =
-          `${BASE}/live-history/contact?term=` +
-          encodeURIComponent(termo);
+      for (
+        let pagina = 1;
+        pagina <= MAX_PAGINAS;
+        pagina++
+      ) {
+        const params = parametrosPesquisa(
+          termo,
+          pagina
+        );
 
-        const resposta = await requisicao(url);
-        const contatos = listaDados(resposta, 'contatos');
+        const resposta = await requisicao(
+          BASE + '/gestao-de-atendimentos?' + params,
+          true
+        );
 
-        for (const contato of contatos) {
-          if (!contato || contato.id == null) continue;
+        const bloco = blocoAtendimentos(resposta);
+        const lista = bloco.data || [];
 
-          const nomeEncontrado = String(
-            contato.name ||
-            contato.contact?.name ||
-            ''
-          );
+        for (const atendimento of lista) {
+          const id = idDoAtendimento(atendimento);
 
-          encontrados.set(String(contato.id), {
-            ...contato,
-            name: nomeEncontrado
-          });
+          if (id == null) continue;
+
+          // A pesquisa do servidor pode devolver
+          // resultados parciais; a seleção final é
+          // feita usando o nome do contato.
+          encontrados.set(String(id), atendimento);
         }
 
-        const existeExato = [...encontrados.values()].some(
-          contato =>
-            normalizarBusca(contato.name) === nomeNormalizado
+        const paginaAtual = Number(
+          bloco.current_page || pagina
         );
 
-        if (existeExato) break;
-
-      } catch (erro) {
-        console.warn(
-          '[Komunic Histórico] Pesquisa falhou:',
-          termo,
-          erro
+        const ultimaPagina = Number(
+          bloco.last_page || pagina
         );
 
-        erros.push(erro.message);
+        const temProxima = Boolean(
+          bloco.next_page_url
+        ) || paginaAtual < ultimaPagina;
+
+        if (!temProxima || !lista.length) break;
       }
+
+      const correspondencias = [
+        ...encontrados.values()
+      ].filter(a => pontuacaoNome(a, nome) >= 60);
+
+      if (correspondencias.length) break;
     }
 
-    const lista = [...encontrados.values()];
+    return [...encontrados.values()]
+      .filter(a => pontuacaoNome(a, nome) >= 35)
+      .sort((a, b) => {
+        const diferenca =
+          pontuacaoNome(b, nome) -
+          pontuacaoNome(a, nome);
 
-    const pontuacao = contato => {
-      const atual = normalizarBusca(contato.name);
+        if (diferenca) return diferenca;
 
-      if (atual === nomeNormalizado) return 100;
-      if (atual.startsWith(nomeNormalizado)) return 80;
-
-      if (
-        nomeNormalizado.startsWith(atual) &&
-        atual.length > 3
-      ) return 70;
-
-      const palavras = nomeNormalizado.split(' ');
-
-      return palavras.filter(p =>
-        p.length > 2 &&
-        atual.split(' ').includes(p)
-      ).length * 10;
-    };
-
-    lista.sort((a, b) =>
-      pontuacao(b) - pontuacao(a)
-    );
-
-    if (!lista.length && erros.length) {
-      throw new Error(
-        'A pesquisa de contatos falhou. ' +
-        erros[0]
-      );
-    }
-
-    return lista;
-  }
-
-  async function buscarAtendimentos(id, pagina) {
-    const url =
-      `${BASE}/live-history/contact/` +
-      `${encodeURIComponent(id)}?page=${pagina}&term=`;
-
-    const dados = await requisicao(url);
-    const lista = listaDados(dados, 'atendimentos');
-
-    return {
-      lista,
-      paginacao: paginacao(
-        dados, 'atendimentos', lista.length, 15
-      )
-    };
+        return dataNumerica(
+          b.date_start || b.created_at
+        ) - dataNumerica(
+          a.date_start || a.created_at
+        );
+      });
   }
 
   async function buscarMensagens(id, cursor = null) {
-    let url =
-      `${BASE}/live-history-chat/` +
-      `${encodeURIComponent(id)}?limit=${LIMITE}`;
+    const params = new URLSearchParams({
+      limit: String(LIMITE)
+    });
 
     if (cursor) {
-      url += '&cursor=' + encodeURIComponent(cursor);
+      params.set('cursor', cursor);
     }
 
-    const dados = await requisicao(url);
-    const lista = listaDados(dados, 'mensagens');
+    const dados = await requisicao(
+      BASE + '/live-history-chat/' +
+      encodeURIComponent(id) + '?' + params
+    );
+
+    const lista = Array.isArray(dados.messages)
+      ? dados.messages
+      : Array.isArray(dados.messages?.data)
+        ? dados.messages.data
+        : [];
 
     return {
-      lista,
-      paginacao: paginacao(
-        dados, 'mensagens', lista.length, LIMITE
-      )
+      mensagens: lista,
+      cursor: dados.pagination?.next_cursor || null,
+      mais: dados.pagination?.has_more === true
     };
   }
 
-  const css = `
-    #modal-historico {
-      position: fixed;
-      inset: 0;
-      z-index: 100002;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: rgba(0,0,0,.6);
-      font-family: Inter,system-ui,sans-serif;
-    }
+  function dataNumerica(valor) {
+    if (!valor) return 0;
 
-    #modal-historico * {
-      box-sizing: border-box;
-    }
+    const numero = new Date(valor).getTime();
 
-    #modal-historico .historico-content {
-      width: 95%;
-      max-width: 850px;
-      height: 85vh;
-      max-height: 850px;
-      background: white;
-      border-radius: 16px;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      box-shadow: 0 20px 40px rgba(0,0,0,.2);
-    }
-
-    #modal-historico .historico-header {
-      background: ${COR};
-      color: #102010;
-      padding: 14px 20px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      font-weight: 700;
-      gap: 12px;
-    }
-
-    #modal-historico .historico-fechar {
-      border: 0;
-      background: transparent;
-      font-size: 26px;
-      cursor: pointer;
-    }
-
-    #modal-historico .historico-lista {
-      flex: 1;
-      min-height: 0;
-      overflow-y: auto;
-      padding: 16px;
-    }
-
-    #modal-historico .historico-card {
-      border: 1px solid #e5e7eb;
-      border-radius: 12px;
-      overflow: hidden;
-      background: #fafafa;
-      margin-bottom: 12px;
-    }
-
-    #modal-historico .historico-card-topo {
-      background: #f3f4f6;
-      padding: 12px;
-      font-size: 13px;
-      line-height: 1.6;
-    }
-
-    #modal-historico .historico-card-corpo {
-      padding: 10px 12px;
-    }
-
-    #modal-historico .historico-botao {
-      background: ${COR};
-      border: 0;
-      border-radius: 20px;
-      padding: 8px 14px;
-      font-size: 12px;
-      font-weight: 600;
-      cursor: pointer;
-    }
-
-    #modal-historico .historico-mensagens {
-      display: none;
-      max-height: 350px;
-      overflow-y: auto;
-      margin-top: 12px;
-      padding: 6px;
-      background: white;
-      border: 1px solid #e5e7eb;
-      border-radius: 10px;
-    }
-
-    #modal-historico .historico-mensagem {
-      display: flex;
-      margin-bottom: 8px;
-    }
-
-    #modal-historico .historico-balao {
-      max-width: 80%;
-      border-radius: 14px;
-      padding: 9px 12px;
-      font-size: 12px;
-      overflow-wrap: anywhere;
-    }
-
-    #modal-historico .historico-aviso {
-      padding: 12px;
-      text-align: center;
-      color: #6b7280;
-      font-size: 12px;
-    }
-
-    #modal-historico .historico-midia img {
-      display: block;
-      max-width: 100%;
-      max-height: 300px;
-      border-radius: 8px;
-      cursor: zoom-in;
-    }
-
-    #modal-historico .historico-midia video {
-      max-width: 100%;
-      max-height: 300px;
-      border-radius: 8px;
-    }
-
-    #modal-historico .historico-midia audio {
-      max-width: 100%;
-      width: 270px;
-    }
-
-    #modal-historico .historico-midia a {
-      color: #1d4ed8;
-      text-decoration: underline;
-    }
-  `;
-
-  const style = criar('style');
-  style.id = 'komunic-historico-estilos';
-  style.textContent = css;
-
-  document.querySelector(
-    '#komunic-historico-estilos'
-  )?.remove();
-
-  document.head.appendChild(style);
-
-  let modalAtual = null;
-  let sessaoMidias = null;
-
-  function fecharModal() {
-    if (sessaoMidias) {
-      sessaoMidias.encerrar();
-      sessaoMidias = null;
-    }
-
-    modalAtual?.remove();
-    modalAtual = null;
+    return Number.isFinite(numero) ? numero : 0;
   }
 
-  function gerenciadorMidias() {
-    const urls = new Set();
-    const controllers = new Set();
-    const pendentes = new Set();
+  function formatarData(valor) {
+    if (!valor) return '—';
 
-    let encerrado = false;
+    const data = new Date(valor);
 
-    const observer = new IntersectionObserver(entradas => {
-      for (const entrada of entradas) {
-        if (!entrada.isIntersecting) continue;
-
-        observer.unobserve(entrada.target);
-        pendentes.delete(entrada.target);
-        entrada.target._carregar?.();
-      }
-    }, { rootMargin: '250px' });
-
-    return {
-      observar(el) {
-        if (encerrado) return;
-
-        pendentes.add(el);
-        observer.observe(el);
-      },
-
-      async carregar(m, container, aviso) {
-        if (encerrado || !container.isConnected) return;
-
-        const controller = new AbortController();
-        controllers.add(controller);
-
-        aviso.textContent = '⏳ Carregando anexo...';
-
-        const caminho =
-          `/messages/${encodeURIComponent(m.id)}?inline=1`;
-
-        try {
-          const resposta = await fetch(caminho, {
-            credentials: 'same-origin',
-            headers: { Accept: '*/*' },
-            signal: controller.signal
-          });
-
-          if (!resposta.ok) {
-            throw new Error('HTTP ' + resposta.status);
-          }
-
-          const blob = await resposta.blob();
-
-          if (encerrado || !container.isConnected) return;
-
-          const url = URL.createObjectURL(blob);
-          urls.add(url);
-
-          const tipo = String(m.type || '').toLowerCase();
-          const mime = String(blob.type || '').toLowerCase();
-          const nome = String(m.file_name || 'Arquivo');
-
-          let elemento;
-
-          if (
-            tipo === 'image' ||
-            mime.startsWith('image/')
-          ) {
-            elemento = criar('img');
-            elemento.src = url;
-            elemento.alt = nome;
-            elemento.loading = 'lazy';
-            elemento.title = 'Clique para ampliar';
-
-            elemento.addEventListener('click', () => {
-              window.open(url, '_blank', 'noopener');
-            });
-
-          } else if (
-            ['audio', 'ptt', 'voice'].includes(tipo) ||
-            mime.startsWith('audio/')
-          ) {
-            elemento = criar('audio');
-            elemento.controls = true;
-            elemento.preload = 'metadata';
-            elemento.src = url;
-
-          } else if (
-            tipo === 'video' ||
-            mime.startsWith('video/')
-          ) {
-            elemento = criar('video');
-            elemento.controls = true;
-            elemento.preload = 'metadata';
-            elemento.src = url;
-
-          } else {
-            elemento = criar(
-              'a', '', '📄 Abrir ' + nome
-            );
-
-            elemento.href = url;
-            elemento.target = '_blank';
-            elemento.rel = 'noopener noreferrer';
-          }
-
-          aviso.replaceWith(elemento);
-
-        } catch (erro) {
-          if (erro.name === 'AbortError') return;
-
-          aviso.textContent =
-            '⚠️ Não foi possível carregar (' +
-            erro.message + '). ';
-
-          const abrir = criar('a', '', 'Tentar abrir');
-          abrir.href = caminho;
-          abrir.target = '_blank';
-          abrir.rel = 'noopener noreferrer';
-
-          aviso.appendChild(abrir);
-
-        } finally {
-          controllers.delete(controller);
-        }
-      },
-
-      encerrar() {
-        encerrado = true;
-        observer.disconnect();
-        pendentes.clear();
-
-        for (const controller of controllers) {
-          controller.abort();
-        }
-
-        controllers.clear();
-
-        for (const url of urls) {
-          URL.revokeObjectURL(url);
-        }
-
-        urls.clear();
-      }
-    };
-  }
-
-  function dataMensagem(valor) {
-    if (!valor) return '';
-
-    const d = new Date(valor);
-
-    return Number.isNaN(d.getTime())
+    return Number.isNaN(data.getTime())
       ? String(valor)
-      : d.toLocaleString('pt-BR');
+      : data.toLocaleString('pt-BR');
   }
 
-  function criarMensagem(m, nomeContato) {
-    const remetente = String(
-      m.sender?.name ||
-      (m.from_me ? 'Atendente' : 'Cliente')
-    );
+  function criarEstilos() {
+    if ($('#gnp-historico-estilos')) return;
 
-    const primeiroNome =
-      normalizarBusca(nomeContato).split(' ')[0];
+    const style = elemento('style');
+    style.id = 'gnp-historico-estilos';
 
-    const nomeRemetente = normalizarBusca(remetente);
+    style.textContent = `
+      #gnp-historico-overlay {
+        position:fixed;
+        inset:0;
+        z-index:999999;
+        background:rgba(15,23,42,.65);
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        padding:16px;
+        font-family:Arial,sans-serif;
+      }
 
-    const isCliente = Boolean(primeiroNome) && (
-      nomeRemetente === normalizarBusca(nomeContato) ||
-      nomeRemetente.split(' ')[0] === primeiroNome
-    );
+      #gnp-historico-overlay * {
+        box-sizing:border-box;
+      }
 
-    const esquerda = m.from_me === false ||
-      (m.from_me == null && isCliente);
+      .gnp-historico-janela {
+        width:100%;
+        max-width:900px;
+        height:88vh;
+        background:#fff;
+        border-radius:14px;
+        overflow:hidden;
+        display:flex;
+        flex-direction:column;
+        box-shadow:0 20px 60px rgba(0,0,0,.3);
+      }
 
-    const item = criar('div', 'historico-mensagem');
+      .gnp-historico-topo {
+        padding:15px 18px;
+        background:#16a34a;
+        color:white;
+        display:flex;
+        justify-content:space-between;
+        align-items:center;
+        gap:12px;
+      }
 
-    item.style.justifyContent = esquerda
-      ? 'flex-start'
-      : 'flex-end';
+      .gnp-historico-titulo {
+        font-size:16px;
+        font-weight:700;
+      }
 
-    const balao = criar('div', 'historico-balao');
+      .gnp-historico-subtitulo {
+        font-size:12px;
+        opacity:.9;
+        margin-top:4px;
+      }
 
-    balao.style.background = esquerda
-      ? '#f3f4f6'
-      : '#dbeafe';
+      .gnp-historico-fechar {
+        background:transparent;
+        border:0;
+        color:white;
+        font-size:28px;
+        cursor:pointer;
+      }
 
-    const cabecalho = criar('div', '', remetente);
+      .gnp-historico-lista {
+        flex:1;
+        min-height:0;
+        overflow:auto;
+        padding:15px;
+        background:#f8fafc;
+      }
 
-    cabecalho.style.cssText =
-      'font-weight:700;font-size:11px;margin-bottom:4px';
+      .gnp-historico-card {
+        background:white;
+        border:1px solid #e2e8f0;
+        border-radius:10px;
+        margin-bottom:12px;
+        overflow:hidden;
+      }
 
-    balao.appendChild(cabecalho);
+      .gnp-historico-card-topo {
+        padding:13px;
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap:10px;
+      }
 
-    const tipo = String(m.type || 'text').toLowerCase();
+      .gnp-historico-card-info {
+        min-width:0;
+        font-size:12px;
+        color:#475569;
+        line-height:1.6;
+      }
 
-    const temArquivo = Boolean(
-      m.id &&
-      m.file_s3 &&
-      !['deleted', 'deleting'].includes(tipo)
-    );
+      .gnp-historico-card-info strong {
+        color:#0f172a;
+        font-size:13px;
+      }
 
-    let texto = String(m.text || '');
-    const prefixo = `*${remetente}*:`;
+      .gnp-historico-acao {
+        flex-shrink:0;
+        border:0;
+        border-radius:8px;
+        background:#16a34a;
+        color:white;
+        font-size:12px;
+        font-weight:600;
+        padding:9px 12px;
+        cursor:pointer;
+      }
 
-    if (texto.startsWith(prefixo)) {
-      texto = texto.slice(prefixo.length).trim();
-    }
+      .gnp-historico-mensagens {
+        display:none;
+        border-top:1px solid #e2e8f0;
+        background:#f1f5f9;
+        padding:12px;
+        max-height:430px;
+        overflow:auto;
+      }
 
-    if (texto || !temArquivo) {
-      const conteudo = criar(
-        'div', '',
-        texto || '[Mensagem não textual]'
-      );
+      .gnp-historico-msg {
+        display:flex;
+        margin-bottom:9px;
+      }
 
-      conteudo.style.whiteSpace = 'pre-wrap';
-      balao.appendChild(conteudo);
-    }
+      .gnp-historico-balao {
+        max-width:85%;
+        padding:10px 12px;
+        border-radius:10px;
+        background:white;
+        box-shadow:0 1px 2px rgba(0,0,0,.06);
+        font-size:12px;
+        color:#0f172a;
+        overflow-wrap:anywhere;
+      }
 
-    if (temArquivo) {
-      const midia = criar('div', 'historico-midia');
-      midia.style.marginTop = '7px';
+      .gnp-historico-msg.saida {
+        justify-content:flex-end;
+      }
 
-      const nome = criar(
-        'div', '',
-        String(m.file_name || 'Anexo')
-      );
+      .gnp-historico-msg.saida
+      .gnp-historico-balao {
+        background:#dcfce7;
+      }
 
-      nome.style.cssText =
-        'font-size:11px;color:#475569;margin-bottom:5px';
+      .gnp-historico-remetente {
+        font-weight:bold;
+        margin-bottom:5px;
+        color:#334155;
+      }
 
-      const aviso = criar(
-        'div', '', '⏳ Aguardando mídia...'
-      );
+      .gnp-historico-texto {
+        white-space:pre-wrap;
+        line-height:1.5;
+      }
 
-      aviso.style.cssText =
-        'font-size:12px;color:#64748b';
+      .gnp-historico-data {
+        text-align:right;
+        color:#64748b;
+        font-size:10px;
+        margin-top:7px;
+      }
 
-      midia.append(nome, aviso);
-      balao.appendChild(midia);
+      .gnp-historico-aviso {
+        padding:12px;
+        text-align:center;
+        font-size:12px;
+        color:#64748b;
+      }
 
-      midia._carregar = () =>
-        sessaoMidias?.carregar(m, midia, aviso);
+      .gnp-historico-rodape {
+        padding:11px;
+        border-top:1px solid #e2e8f0;
+        font-size:12px;
+        text-align:center;
+        color:#475569;
+        background:white;
+      }
 
-      sessaoMidias?.observar(midia);
-    }
+      .gnp-historico-midia {
+        margin-top:8px;
+      }
 
-    const horario = criar(
-      'div', '', dataMensagem(m.created_at)
-    );
+      .gnp-historico-midia img,
+      .gnp-historico-midia video {
+        max-width:100%;
+        max-height:300px;
+        border-radius:8px;
+      }
 
-    horario.style.cssText =
-      'font-size:10px;color:#6b7280;margin-top:6px';
+      .gnp-historico-midia audio {
+        max-width:100%;
+      }
 
-    balao.appendChild(horario);
-    item.appendChild(balao);
-
-    return item;
-  }
-
-  function criarCard(atendimento, nomeContato) {
-    const card = criar('div', 'historico-card');
-    const topo = criar('div', 'historico-card-topo');
-
-    const status = atendimento.status || 'desconhecido';
-
-    const corStatus = status === 'closed'
-      ? '#10b981'
-      : status === 'open'
-        ? COR
-        : '#6b7280';
-
-    topo.innerHTML = `
-      <div style="display:flex;justify-content:space-between;gap:8px">
-        <strong>
-          🔖 Protocolo:
-          ${escapeHtml(atendimento.protocol || 'N/A')}
-        </strong>
-        <span>
-          <span style="display:inline-block;width:9px;height:9px;
-            border-radius:50%;background:${corStatus}"></span>
-          ${escapeHtml(status)}
-        </span>
-      </div>
-
-      <div style="color:#4b5563">
-        📅 ${escapeHtml(atendimento.date_start || '—')}
-        ${atendimento.date_end
-          ? ' → ' + escapeHtml(atendimento.date_end)
-          : ' (em andamento)'}
-      </div>
-
-      <div style="color:#4b5563">
-        👤 ${escapeHtml(atendimento.attendant?.name || '—')}
-        |
-        🏢 ${escapeHtml(atendimento.department?.name || '—')}
-      </div>
+      .gnp-historico-midia a {
+        color:#2563eb;
+        text-decoration:underline;
+      }
     `;
 
-    const corpo = criar('div', 'historico-card-corpo');
+    document.head.appendChild(style);
+  }
 
-    const botao = criar(
+  function fecharModal() {
+    if (!modal) return;
+
+    modal.remove();
+    modal = null;
+  }
+
+  function abrirModal(nome, atendimentos) {
+    fecharModal();
+
+    const overlay = elemento('div');
+    overlay.id = 'gnp-historico-overlay';
+
+    const janela = elemento(
+      'div',
+      'gnp-historico-janela'
+    );
+
+    const topo = elemento(
+      'div',
+      'gnp-historico-topo'
+    );
+
+    const textos = elemento('div');
+
+    textos.appendChild(
+      elemento(
+        'div',
+        'gnp-historico-titulo',
+        'Histórico de atendimentos'
+      )
+    );
+
+    textos.appendChild(
+      elemento(
+        'div',
+        'gnp-historico-subtitulo',
+        nome
+      )
+    );
+
+    const fechar = elemento(
       'button',
-      'historico-botao',
-      '💬 Ver mensagens'
+      'gnp-historico-fechar',
+      '×'
+    );
+
+    fechar.type = 'button';
+    fechar.onclick = fecharModal;
+
+    topo.append(textos, fechar);
+
+    const lista = elemento(
+      'div',
+      'gnp-historico-lista'
+    );
+
+    const rodape = elemento(
+      'div',
+      'gnp-historico-rodape',
+      atendimentos.length +
+      ' atendimento(s) encontrado(s)'
+    );
+
+    janela.append(topo, lista, rodape);
+    overlay.appendChild(janela);
+
+    overlay.addEventListener('click', evento => {
+      if (evento.target === overlay) {
+        fecharModal();
+      }
+    });
+
+    document.body.appendChild(overlay);
+    modal = overlay;
+
+    for (const atendimento of atendimentos) {
+      lista.appendChild(
+        criarCardAtendimento(atendimento)
+      );
+    }
+  }
+
+  function criarCardAtendimento(atendimento) {
+    const card = elemento(
+      'div',
+      'gnp-historico-card'
+    );
+
+    const topo = elemento(
+      'div',
+      'gnp-historico-card-topo'
+    );
+
+    const info = elemento(
+      'div',
+      'gnp-historico-card-info'
+    );
+
+    const protocolo = String(
+      atendimento.protocol || 'Sem protocolo'
+    );
+
+    const nome = nomeDoAtendimento(atendimento);
+
+    const departamento = String(
+      atendimento.department?.name || '—'
+    );
+
+    const atendente = String(
+      atendimento.attendant?.name || '—'
+    );
+
+    const dataInicio = formatarData(
+      atendimento.date_start ||
+      atendimento.created_at
+    );
+
+    const dataFim = atendimento.date_end
+      ? formatarData(atendimento.date_end)
+      : 'Em andamento';
+
+    const titulo = elemento(
+      'strong',
+      '',
+      'Protocolo: ' + protocolo
+    );
+
+    const detalhe = elemento('div');
+
+    detalhe.textContent =
+      `${nome || 'Contato'} | ${departamento}\n` +
+      `Atendente: ${atendente}\n` +
+      `${dataInicio} → ${dataFim}`;
+
+    detalhe.style.whiteSpace = 'pre-line';
+
+    info.append(titulo, detalhe);
+
+    const botao = elemento(
+      'button',
+      'gnp-historico-acao',
+      'Ver mensagens'
     );
 
     botao.type = 'button';
 
-    const area = criar('div', 'historico-mensagens');
+    topo.append(info, botao);
 
-    corpo.append(botao, area);
-    card.append(topo, corpo);
-
-    const estado = {
-      cursor: null,
-      carregando: false,
-      mais: true,
-      inicializado: false,
-      primeiraCarga: true,
-      ids: new Set(),
-      assinaturaAnterior: '',
-      cursoresUsados: new Set()
-    };
-
-    const chave = m => String(
-      m.id ??
-      m.uuid ??
-      [m.created_at, m.sender?.name, m.text, m.from_me]
-        .join('|')
+    const area = elemento(
+      'div',
+      'gnp-historico-mensagens'
     );
 
-    async function carregarMensagens() {
+    card.append(topo, area);
+
+    const estado = {
+      carregando: false,
+      iniciado: false,
+      mais: true,
+      cursor: null,
+      cursores: new Set(),
+      mensagens: new Set(),
+      primeiraCarga: true
+    };
+
+    botao.addEventListener('click', async () => {
+      if (area.style.display === 'block') {
+        area.style.display = 'none';
+        botao.textContent = 'Ver mensagens';
+        return;
+      }
+
+      area.style.display = 'block';
+      botao.textContent = 'Ocultar mensagens';
+
+      if (!estado.iniciado) {
+        estado.iniciado = true;
+        await carregar();
+      }
+    });
+
+    area.addEventListener('scroll', () => {
+      if (
+        area.scrollTop < 70 &&
+        estado.mais &&
+        !estado.carregando
+      ) {
+        carregar();
+      }
+    }, { passive: true });
+
+    async function carregar() {
       if (
         estado.carregando ||
         !estado.mais ||
         !area.isConnected
       ) return;
 
-      estado.carregando = true;
+      const id = idDoAtendimento(atendimento);
 
-      let aviso = area.querySelector(
-        '.historico-aviso-carga'
-      );
-
-      if (!aviso) {
-        aviso = criar(
-          'div',
-          'historico-aviso historico-aviso-carga'
-        );
-
-        area.prepend(aviso);
+      if (id == null) {
+        area.textContent =
+          'ID do atendimento indisponível.';
+        estado.mais = false;
+        return;
       }
 
-      aviso.textContent = '⏳ Carregando mensagens...';
+      estado.carregando = true;
+
+      const aviso = elemento(
+        'div',
+        'gnp-historico-aviso',
+        'Carregando mensagens...'
+      );
+
+      area.prepend(aviso);
 
       try {
-        const cursorAtual = estado.cursor;
-
         const resultado = await buscarMensagens(
-          atendimento.id,
-          cursorAtual
+          id,
+          estado.cursor
         );
 
         if (!area.isConnected) return;
 
-        const assinatura =
-          resultado.lista.map(chave).join('||');
+        const mensagensNovas =
+          resultado.mensagens.filter(m => {
+            const chave = String(
+              m.id ||
+              `${m.created_at}|${m.text}`
+            );
 
-        if (
-          assinatura &&
-          assinatura === estado.assinaturaAnterior
-        ) {
-          estado.mais = false;
-          aviso.textContent =
-            'O servidor repetiu o mesmo lote.';
-          return;
-        }
+            if (estado.mensagens.has(chave)) {
+              return false;
+            }
 
-        estado.assinaturaAnterior = assinatura;
+            estado.mensagens.add(chave);
+            return true;
+          });
 
-        const novas = resultado.lista.filter(m => {
-          const id = chave(m);
-
-          if (estado.ids.has(id)) return false;
-
-          estado.ids.add(id);
-          return true;
-        });
-
-        novas.sort((a, b) =>
-          (new Date(a.created_at || 0).getTime() || 0) -
-          (new Date(b.created_at || 0).getTime() || 0)
+        mensagensNovas.sort(
+          (a, b) =>
+            dataNumerica(a.created_at) -
+            dataNumerica(b.created_at)
         );
 
         const alturaAnterior = area.scrollHeight;
@@ -990,13 +830,16 @@
         const fragmento =
           document.createDocumentFragment();
 
-        for (const m of novas) {
+        for (const mensagem of mensagensNovas) {
           fragmento.appendChild(
-            criarMensagem(m, nomeContato)
+            criarMensagem(mensagem)
           );
         }
 
-        area.insertBefore(fragmento, aviso.nextSibling);
+        area.insertBefore(
+          fragmento,
+          aviso.nextSibling
+        );
 
         if (estado.primeiraCarga) {
           estado.primeiraCarga = false;
@@ -1008,304 +851,283 @@
             alturaAnterior;
         }
 
-        const proximo = resultado.paginacao.cursor;
+        const proximoCursor = resultado.cursor;
 
         estado.mais =
-          Boolean(resultado.paginacao.mais) &&
-          Boolean(proximo) &&
-          !estado.cursoresUsados.has(proximo) &&
-          novas.length > 0;
+          resultado.mais &&
+          Boolean(proximoCursor) &&
+          !estado.cursores.has(proximoCursor) &&
+          mensagensNovas.length > 0;
 
-        if (cursorAtual) {
-          estado.cursoresUsados.add(cursorAtual);
+        if (proximoCursor) {
+          estado.cursores.add(proximoCursor);
         }
 
-        estado.cursor = proximo;
+        estado.cursor = proximoCursor;
 
         aviso.textContent = estado.mais
           ? '↑ Role para cima para carregar mensagens anteriores'
-          : '✓ Fim das mensagens disponíveis';
+          : 'Fim das mensagens disponíveis';
 
       } catch (erro) {
-        console.error('[Komunic Histórico]', erro);
+        console.error(
+          '[Komunic Histórico] Erro nas mensagens:',
+          erro
+        );
 
         aviso.textContent =
-          '❌ Falha: ' + erro.message +
-          '. Role novamente para tentar.';
+          'Erro ao carregar mensagens: ' +
+          erro.message;
 
       } finally {
         estado.carregando = false;
       }
     }
-
-    botao.addEventListener('click', async () => {
-      if (area.style.display === 'block') {
-        area.style.display = 'none';
-        botao.textContent = '💬 Ver mensagens';
-        return;
-      }
-
-      area.style.display = 'block';
-      botao.textContent = '▲ Ocultar mensagens';
-
-      if (!estado.inicializado) {
-        estado.inicializado = true;
-        await carregarMensagens();
-      }
-    });
-
-    area.addEventListener('scroll', () => {
-      if (
-        area.scrollTop <= 65 &&
-        estado.inicializado &&
-        estado.mais &&
-        !estado.carregando
-      ) {
-        carregarMensagens();
-      }
-    }, { passive: true });
 
     return card;
   }
 
-  function mostrarModal(nomeContato, contatoId) {
-    fecharModal();
-
-    sessaoMidias = gerenciadorMidias();
-
-    const modal = criar('div');
-    modal.id = 'modal-historico';
-
-    const content = criar('div', 'historico-content');
-    const header = criar('div', 'historico-header');
-
-    const titulo = criar(
-      'span',
-      '',
-      '📜 Histórico de Atendimentos — ' + nomeContato
+  function criarMensagem(mensagem) {
+    const remetente = String(
+      mensagem.sender?.name ||
+      (mensagem.from_system
+        ? 'Atendente'
+        : 'Contato')
     );
 
-    const fechar = criar(
-      'button', 'historico-fechar', '×'
-    );
+    // O retorno real usa from_system para mensagens
+    // de atendentes. from_me pode vir false em ambas.
+    const enviada = mensagem.from_system === true ||
+      mensagem.key?.fromMe === true;
 
-    fechar.type = 'button';
-    fechar.addEventListener('click', fecharModal);
-
-    header.append(titulo, fechar);
-
-    const lista = criar('div', 'historico-lista');
-
-    const rodape = criar(
+    const linha = elemento(
       'div',
-      'historico-aviso',
-      'Preparando histórico...'
+      'gnp-historico-msg' +
+      (enviada ? ' saida' : '')
     );
 
-    content.append(header, lista, rodape);
-    modal.appendChild(content);
-    document.body.appendChild(modal);
+    const balao = elemento(
+      'div',
+      'gnp-historico-balao'
+    );
 
-    modalAtual = modal;
+    balao.appendChild(
+      elemento(
+        'div',
+        'gnp-historico-remetente',
+        remetente
+      )
+    );
 
-    modal.addEventListener('click', e => {
-      if (e.target === modal) fecharModal();
-    });
+    let texto = String(mensagem.text || '');
 
-    const estado = {
-      pagina: 1,
-      carregando: false,
-      mais: true,
-      ids: new Set(),
-      total: 0,
-      assinaturaAnterior: '',
-      semNovos: 0
-    };
+    const prefixo = `*${remetente}*:`;
 
-    async function carregarAtendimentos() {
-      if (
-        estado.carregando ||
-        !estado.mais ||
-        !modal.isConnected
-      ) return;
-
-      estado.carregando = true;
-
-      rodape.textContent =
-        '⏳ Carregando atendimentos...';
-
-      try {
-        const resultado = await buscarAtendimentos(
-          contatoId,
-          estado.pagina
-        );
-
-        if (!modal.isConnected) return;
-
-        const atendimentos = resultado.lista;
-
-        const assinatura = atendimentos
-          .map(a => String(a.id))
-          .join('|');
-
-        if (
-          assinatura &&
-          assinatura === estado.assinaturaAnterior
-        ) {
-          estado.mais = false;
-
-          rodape.textContent =
-            'O servidor repetiu a página anterior.';
-
-          return;
-        }
-
-        estado.assinaturaAnterior = assinatura;
-
-        if (estado.pagina === 1) {
-          atendimentos.sort((a, b) =>
-            new Date(b.date_start || 0) -
-            new Date(a.date_start || 0)
-          );
-        }
-
-        let novos = 0;
-
-        for (const atendimento of atendimentos) {
-          const id = String(atendimento.id);
-
-          if (estado.ids.has(id)) continue;
-
-          estado.ids.add(id);
-
-          lista.appendChild(
-            criarCard(atendimento, nomeContato)
-          );
-
-          novos++;
-          estado.total++;
-        }
-
-        estado.semNovos = novos === 0
-          ? estado.semNovos + 1
-          : 0;
-
-        estado.mais =
-          Boolean(resultado.paginacao.mais) &&
-          estado.semNovos < 2;
-
-        estado.pagina++;
-
-        rodape.textContent = estado.mais
-          ? `${estado.total} atendimento(s). ↓ Role para carregar mais.`
-          : `${estado.total} atendimento(s). ✓ Fim do histórico.`;
-
-        if (estado.total === 0) {
-          rodape.textContent =
-            'Nenhum atendimento encontrado.';
-        }
-
-      } catch (erro) {
-        console.error('[Komunic Histórico]', erro);
-
-        rodape.textContent =
-          '❌ Erro: ' + erro.message +
-          '. Role novamente para tentar.';
-
-      } finally {
-        estado.carregando = false;
-      }
+    if (texto.startsWith(prefixo)) {
+      texto = texto.slice(prefixo.length).trim();
     }
 
-    lista.addEventListener('scroll', () => {
-      const distancia =
-        lista.scrollHeight -
-        lista.scrollTop -
-        lista.clientHeight;
+    if (texto) {
+      balao.appendChild(
+        elemento(
+          'div',
+          'gnp-historico-texto',
+          texto
+        )
+      );
+    }
 
-      if (
-        distancia < 160 &&
-        estado.mais &&
-        !estado.carregando
-      ) {
-        carregarAtendimentos();
-      }
-    }, { passive: true });
+    if (mensagem.file_s3 && mensagem.id) {
+      const midia = elemento(
+        'div',
+        'gnp-historico-midia'
+      );
 
-    carregarAtendimentos();
+      const botao = elemento(
+        'button',
+        'gnp-historico-acao',
+        'Carregar anexo'
+      );
+
+      botao.type = 'button';
+
+      botao.addEventListener('click', async () => {
+        botao.disabled = true;
+        botao.textContent = 'Carregando...';
+
+        try {
+          await carregarMidia(mensagem, midia);
+          botao.remove();
+        } catch (erro) {
+          botao.disabled = false;
+          botao.textContent = 'Tentar novamente';
+
+          console.error(
+            '[Komunic Histórico] Erro no anexo:',
+            erro
+          );
+        }
+      });
+
+      midia.appendChild(botao);
+      balao.appendChild(midia);
+    }
+
+    balao.appendChild(
+      elemento(
+        'div',
+        'gnp-historico-data',
+        formatarData(mensagem.created_at)
+      )
+    );
+
+    linha.appendChild(balao);
+
+    return linha;
   }
 
-  let abrindo = false;
+  async function carregarMidia(mensagem, container) {
+    const url =
+      BASE + '/messages/' +
+      encodeURIComponent(mensagem.id) +
+      '?inline=1';
 
-  async function exibirHistorico() {
+    const resposta = await fetch(url, {
+      credentials: 'same-origin',
+      headers: { Accept: '*/*' }
+    });
+
+    if (!resposta.ok) {
+      throw new Error(
+        'Não foi possível carregar o anexo: HTTP ' +
+        resposta.status
+      );
+    }
+
+    const blob = await resposta.blob();
+    const objetoUrl = URL.createObjectURL(blob);
+
+    const tipo = String(
+      mensagem.type || ''
+    ).toLowerCase();
+
+    const mime = String(
+      blob.type || ''
+    ).toLowerCase();
+
+    let arquivo;
+
+    if (
+      tipo === 'image' ||
+      mime.startsWith('image/')
+    ) {
+      arquivo = elemento('img');
+      arquivo.src = objetoUrl;
+      arquivo.alt = mensagem.file_name || 'Imagem';
+      arquivo.style.cursor = 'pointer';
+
+      arquivo.onclick = () =>
+        window.open(objetoUrl, '_blank');
+
+    } else if (
+      ['audio', 'ptt', 'voice'].includes(tipo) ||
+      mime.startsWith('audio/')
+    ) {
+      arquivo = elemento('audio');
+      arquivo.controls = true;
+      arquivo.src = objetoUrl;
+
+    } else if (
+      tipo === 'video' ||
+      mime.startsWith('video/')
+    ) {
+      arquivo = elemento('video');
+      arquivo.controls = true;
+      arquivo.src = objetoUrl;
+
+    } else {
+      arquivo = elemento(
+        'a',
+        '',
+        'Abrir ' +
+        (mensagem.file_name || 'documento')
+      );
+
+      arquivo.href = objetoUrl;
+      arquivo.target = '_blank';
+      arquivo.rel = 'noopener noreferrer';
+    }
+
+    container.appendChild(arquivo);
+
+    // O blob é liberado quando a janela de histórico
+    // for fechada, evitando invalidar o anexo aberto.
+    if (!modal._urlsMidia) {
+      modal._urlsMidia = new Set();
+    }
+
+    modal._urlsMidia.add(objetoUrl);
+  }
+
+  async function abrirHistorico() {
     if (abrindo) return;
 
     const nome = nomeContatoAtual();
 
     if (!nome) {
       alert(
-        'Não foi possível identificar o contato atual.'
+        'Não foi possível identificar o contato ' +
+        'da conversa atual.'
       );
       return;
     }
 
     abrindo = true;
 
-    try {
-      const contatos = await buscarContato(nome);
+    const botao = $('#btn-historico-chat');
 
-      if (!contatos.length) {
+    if (botao) {
+      botao.disabled = true;
+      botao.title = 'Pesquisando atendimentos...';
+      botao.style.opacity = '.5';
+    }
+
+    try {
+      const atendimentos =
+        await buscarAtendimentosPorNome(nome);
+
+      if (!atendimentos.length) {
         alert(
-          `Nenhum contato encontrado para "${nome}".\n\n` +
-          'Verifique se o contato está cadastrado ' +
-          'no histórico do Komunic.'
+          'Nenhum atendimento localizado para "' +
+          nome + '".\n\n' +
+          'A pesquisa foi realizada na tela ' +
+          'Gestão de Atendimentos.'
         );
+
         return;
       }
 
-      const nomeAtual = normalizarBusca(nome);
-
-      const exatos = contatos.filter(
-        contato =>
-          normalizarBusca(contato.name) === nomeAtual
-      );
-
-      let escolhido = null;
-
-      if (exatos.length === 1) {
-        escolhido = exatos[0];
-      } else {
-        escolhido = await selecionarContato(
-          nome,
-          exatos.length ? exatos : contatos
-        );
-      }
-
-      if (!escolhido) return;
-
-      console.log(
-        '[Komunic Histórico] Contato escolhido:',
-        {
-          id: escolhido.id,
-          nome: escolhido.name
-        }
-      );
-
-      mostrarModal(
-        escolhido.name || nome,
-        escolhido.id
-      );
+      abrirModal(nome, atendimentos);
 
     } catch (erro) {
-      console.error('[Komunic Histórico]', erro);
+      console.error(
+        '[Komunic Histórico] Erro:',
+        erro
+      );
 
       alert(
-        'Não foi possível abrir o histórico.\n\n' +
+        'Não foi possível consultar o histórico.\n\n' +
         erro.message
       );
 
     } finally {
       abrindo = false;
+
+      if (botao) {
+        botao.disabled = false;
+        botao.title = 'Histórico do contato';
+        botao.style.opacity = '1';
+      }
     }
   }
 
@@ -1314,27 +1136,22 @@
       return;
     }
 
-    if (
-      !new URLSearchParams(location.search).has('chat')
-    ) {
-      return;
-    }
+    const params = new URLSearchParams(
+      location.search
+    );
 
-    const container =
-      document.querySelector('.flex.mr-2');
+    if (!params.has('chat')) return;
+
+    if ($('#btn-historico-chat')) return;
+
+    const container = $('.flex.mr-2');
 
     if (!container) return;
 
-    if (
-      document.querySelector('#btn-historico-chat')
-    ) {
-      return;
-    }
-
-    const botao = criar('button');
-
+    const botao = elemento('button');
     botao.id = 'btn-historico-chat';
     botao.type = 'button';
+    botao.title = 'Histórico do contato';
 
     botao.className =
       'rounded-full flex items-center justify-center ' +
@@ -1342,27 +1159,25 @@
       'border border-gray-300';
 
     botao.style.cursor = 'pointer';
-    botao.title = 'Histórico do contato';
 
     botao.innerHTML = `
       <svg xmlns="http://www.w3.org/2000/svg"
-        fill="none"
+        width="23"
+        height="23"
         viewBox="0 0 24 24"
-        stroke-width="1.5"
-        stroke="currentColor"
-        class="h-6 w-6"
-        style="color:${COR}">
-        <path
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"
-        />
+        fill="none"
+        stroke="#16a34a"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9"></circle>
+        <path d="M12 7v5l3 2"></path>
       </svg>
     `;
 
     botao.addEventListener(
       'click',
-      exibirHistorico
+      abrirHistorico
     );
 
     container.insertBefore(
@@ -1371,38 +1186,47 @@
     );
   }
 
-  let ultimaUrl = location.href;
-  let verificacaoPendente = false;
+  function iniciar() {
+    criarEstilos();
 
-  function verificarBotao() {
-    if (verificacaoPendente) return;
+    if (observadorBotao) {
+      observadorBotao.disconnect();
+    }
 
-    verificacaoPendente = true;
+    let pendente = false;
 
-    requestAnimationFrame(() => {
-      verificacaoPendente = false;
+    observadorBotao = new MutationObserver(() => {
+      if (pendente) return;
 
-      if (location.href !== ultimaUrl) {
-        ultimaUrl = location.href;
-        fecharModal();
-      }
+      pendente = true;
 
-      adicionarBotao();
+      requestAnimationFrame(() => {
+        pendente = false;
+
+        if (location.href !== ultimaUrl) {
+          ultimaUrl = location.href;
+          fecharModal();
+        }
+
+        adicionarBotao();
+      });
     });
+
+    observadorBotao.observe(
+      document.body,
+      {
+        childList: true,
+        subtree: true
+      }
+    );
+
+    adicionarBotao();
+
+    console.log(
+      '[Komunic Histórico] Versão 4.3 iniciada.'
+    );
   }
 
-  new MutationObserver(verificarBotao).observe(
-    document.body,
-    {
-      subtree: true,
-      childList: true
-    }
-  );
-
-  adicionarBotao();
-
-  console.log(
-    '[Komunic Histórico] Script v4.2 iniciado.'
-  );
+  iniciar();
 
 })();
